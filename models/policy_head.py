@@ -87,25 +87,54 @@ class ProgressMonitor(nn.Module):
 
 
 class MultiHeadPolicy(nn.Module):
-    """多头策略网络: 主动作 + 辅助任务。
+    """多头策略网络: 主动作 + stop 判断 + 可选辅助任务。
 
-    Args:
-        input_dim:             融合特征维度
-        use_progress_monitor:  是否启用进度监控
+    输出:
+        pred_action: (B, 4)  [dx, dy, dz, dyaw]
+        stop_logit:  (B, 1)  是否停止的原始 logit
+        progress:    (B, 1)  可选，轨迹完成比例
     """
 
     def __init__(
         self,
         input_dim: int = 512,
+        policy_hidden_dims: Tuple[int, ...] = (512, 256),
         use_progress_monitor: bool = False,
         dropout: float = 0.3,
     ):
         super().__init__()
-        self.action_head = PolicyHead(input_dim=input_dim, dropout=dropout)
-        self.progress_head = ProgressMonitor(input_dim) if use_progress_monitor else None
+
+        # 连续动作头，保持原样
+        self.action_head = PolicyHead(
+            input_dim=input_dim,
+            hidden_dims=policy_hidden_dims,
+            dropout=dropout,
+        )
+
+        # 新增：stop 二分类头
+        # 注意：这里最后不要加 Sigmoid
+        # 因为训练时建议用 BCEWithLogitsLoss，内部会自动处理 sigmoid
+        self.stop_head = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.LayerNorm(128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(128, 1),
+        )
+
+        self.progress_head = (
+            ProgressMonitor(input_dim)
+            if use_progress_monitor
+            else None
+        )
 
     def forward(self, fused_feat: torch.Tensor) -> Dict[str, torch.Tensor]:
-        outputs = {"pred_action": self.action_head(fused_feat)}
+        outputs = {
+            "pred_action": self.action_head(fused_feat),  # (B, 4)
+            "stop_logit": self.stop_head(fused_feat),     # (B, 1)
+        }
+
         if self.progress_head is not None:
             outputs["progress"] = self.progress_head(fused_feat)
+
         return outputs

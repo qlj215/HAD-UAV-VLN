@@ -1,0 +1,57 @@
+# ============================================================
+# HAD-UAV-VLN 训练配置
+# ============================================================
+# 与 engine/train.py 的 Trainer 类配套使用。
+# 所有 key 需与 train.py 中 train_cfg.get(...) 保持一致。
+
+training:
+  # ---- 基础参数 ----
+  epochs: 30                   # 训练轮数
+  batch_size: 16               # 小数据集用较小 batch
+  num_workers: 2               # DataLoader 子进程数
+
+  # ---- 优化器 ----
+  optimizer:
+    type: "adamw"              # adamw / adam / sgd
+    learning_rate: 1.0e-4
+    weight_decay: 1.0e-4
+    betas: [0.9, 0.999]
+
+  # ---- 学习率调度 ----
+  lr_scheduler:
+    type: "cosine"             # cosine / step / plateau
+    warmup_epochs: 3           # 前 N 个 epoch 线性 warmup
+    min_lr: 1.0e-6             # cosine 衰减终点
+    step_size: 10              # step scheduler 参数
+    gamma: 0.1                 # step scheduler 衰减因子
+
+  # ---- 损失函数权重 ----
+  loss:
+    action_weight: 1.0         # 动作预测 MSE
+    stop_weight: 0.5           # 终点判断 BCE
+    progress_weight: 0.1       # 进度监控 MSE (仅 progress_monitor=true)
+
+  # ---- 混合精度训练 (AMP) ----
+  mixed_precision: true
+
+  # ---- 梯度裁剪 ----
+  gradient_clip:
+    enable: true
+    max_norm: 5.0
+
+  # ---- 日志与保存 ----
+  logging:
+    log_interval: 10           # 每 N 个 batch 打印一次
+    eval_interval: 5           # 每 N 个 epoch 验证一次
+    save_interval: 5           # 每 N 个 epoch 保存检查点
+
+  # ---- 随机种子 ----
+  seed: 42
+
+  # ---- 输出目录 ----
+  # 优先级: 命令行 --output_dir > output.dir > output.root_dir/output.run_name
+  # run_name 留空时，train.py 默认使用当前时间戳。
+  output:
+    root_dir: "./output"
+    run_name: null
+    dir: null

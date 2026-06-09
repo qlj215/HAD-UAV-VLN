@@ -81,18 +81,10 @@ class ConcatFusion(nn.Module):
 class HeightConditionedFusion(nn.Module):
     """高度条件门控融合。
 
-    核心思想: 高度信息决定视角的可靠性 ——
-    - 低空时前视细节丰富, 俯视视野窄 → 前视权重高
-    - 高空时俯视全局信息清晰, 前视细节稀疏 → 俯视权重高
-    门控系数由 [F_front, F_down, F_text, F_height] 联合决定,
-    其中 F_height 作为条件信号调节视角偏好。
-
-    Args:
-        vis_dim:    单视角视觉特征维度
-        text_dim:   文本特征维度
-        height_dim: 高度特征维度
-        hidden_dim: 融合隐层维度
-        dropout:    Dropout 比率
+    逻辑：
+    1. 用高度、文本、前视、俯视共同预测前视/俯视权重；
+    2. 用 gate 融合两个视觉视角；
+    3. 最终 fused 显式保留视觉、文本、高度三类信息。
     """
 
     def __init__(
@@ -105,35 +97,51 @@ class HeightConditionedFusion(nn.Module):
     ):
         super().__init__()
 
-        # 投影到统一维度
         self.front_proj = nn.Sequential(
             nn.Linear(vis_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(inplace=True),
         )
+
         self.down_proj = nn.Sequential(
             nn.Linear(vis_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(inplace=True),
         )
-        self.text_proj = nn.Linear(text_dim, hidden_dim)
-        self.height_proj = nn.Linear(height_dim, hidden_dim)
 
-        # 门控网络: [F_front, F_down, F_text, F_height] → [α_front, α_down]
-        self.gate_net = nn.Sequential(
-            nn.Linear(hidden_dim * 4, hidden_dim),
+        # 建议文本和高度也加 LayerNorm + ReLU，和视觉分支风格统一
+        self.text_proj = nn.Sequential(
+            nn.Linear(text_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 2),
-            nn.Softmax(dim=-1),
         )
 
-        # 融合后处理
-        self.fusion_out = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+        self.height_proj = nn.Sequential(
+            nn.Linear(height_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+        )
+
+        # 用四类信息共同预测视角权重
+        self.gate_net = nn.Sequential(
+            nn.Linear(hidden_dim * 4, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 2),
+            nn.Softmax(dim=-1),  # 两个视角权重和为 1
+        )
+
+        # 关键修改：
+        # 输入不再只是 weighted visual，而是 [weighted visual, text, height]
+        self.fusion_out = nn.Sequential(
+            nn.Linear(hidden_dim * 3, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
         )
 
     def forward(
@@ -143,30 +151,29 @@ class HeightConditionedFusion(nn.Module):
         F_text: torch.Tensor,
         F_height: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            F_front:  (B, vis_dim)
-            F_down:   (B, vis_dim)
-            F_text:   (B, text_dim)
-            F_height: (B, height_dim)
 
-        Returns:
-            fused:       (B, hidden_dim)
-            gate_weight: (B, 2)  [α_front, α_down], 用于可视化
-        """
-        # 投影
-        h_front = self.front_proj(F_front)     # (B, hidden)
-        h_down = self.down_proj(F_down)        # (B, hidden)
-        h_text = self.text_proj(F_text)        # (B, hidden)
-        h_alt = self.height_proj(F_height)     # (B, hidden)
+        h_front = self.front_proj(F_front)    # (B, hidden)
+        h_down = self.down_proj(F_down)       # (B, hidden)
+        h_text = self.text_proj(F_text)       # (B, hidden)
+        h_alt = self.height_proj(F_height)    # (B, hidden)
 
-        # 门控系数 (4 个信号联合决定)
-        gate_input = torch.cat([h_front, h_down, h_text, h_alt], dim=-1)
-        gate = self.gate_net(gate_input)       # (B, 2)
+        gate_input = torch.cat(
+            [h_front, h_down, h_text, h_alt],
+            dim=-1,
+        )
 
-        # 加权融合
-        weighted = gate[:, 0:1] * h_front + gate[:, 1:2] * h_down
-        fused = self.fusion_out(weighted)
+        gate = self.gate_net(gate_input)      # (B, 2)
+
+        # 只对两个视觉视角做门控
+        weighted_vis = gate[:, 0:1] * h_front + gate[:, 1:2] * h_down
+
+        # 最终融合时显式加入文本和高度
+        fusion_input = torch.cat(
+            [weighted_vis, h_text, h_alt],
+            dim=-1,
+        )
+
+        fused = self.fusion_out(fusion_input) # (B, hidden)
 
         return fused, gate
 
@@ -176,17 +183,10 @@ class HeightConditionedFusion(nn.Module):
 # ================================================================
 
 class CrossAttentionFusion(nn.Module):
-    """交叉注意力融合: 文本作 Query, 视觉作 Key/Value。
+    """交叉注意力融合。
 
-    适合语言指令对特定视角有偏好的场景。
-
-    Args:
-        vis_dim:    单视角视觉特征维度
-        text_dim:   文本特征维度
-        height_dim: 高度特征维度
-        hidden_dim: 隐层维度
-        num_heads:  注意力头数
-        dropout:    Dropout 比率
+    文本作为 Query；
+    前视、俯视、高度作为 Key/Value token。
     """
 
     def __init__(
@@ -200,14 +200,40 @@ class CrossAttentionFusion(nn.Module):
     ):
         super().__init__()
 
-        # 将双视角视觉特征拼接并投影
-        self.vis_proj = nn.Linear(vis_dim * 2, hidden_dim)
-        self.text_proj = nn.Linear(text_dim, hidden_dim)
-        self.height_proj = nn.Linear(height_dim, hidden_dim)
+        if hidden_dim % num_heads != 0:
+            raise ValueError(
+                f"hidden_dim={hidden_dim} 必须能被 num_heads={num_heads} 整除"
+            )
+
+        self.front_proj = nn.Sequential(
+            nn.Linear(vis_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+        )
+
+        self.down_proj = nn.Sequential(
+            nn.Linear(vis_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+        )
+
+        self.text_proj = nn.Sequential(
+            nn.Linear(text_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+        )
+
+        self.height_proj = nn.Sequential(
+            nn.Linear(height_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+        )
 
         self.cross_attn = nn.MultiheadAttention(
-            embed_dim=hidden_dim, num_heads=num_heads,
-            dropout=dropout, batch_first=True,
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
         )
 
         self.norm1 = nn.LayerNorm(hidden_dim)
@@ -227,19 +253,33 @@ class CrossAttentionFusion(nn.Module):
         F_text: torch.Tensor,
         F_height: torch.Tensor,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        # 视觉特征拼接
-        vis = self.vis_proj(torch.cat([F_front, F_down], dim=-1)).unsqueeze(1)
-        text = self.text_proj(F_text).unsqueeze(1)
 
-        # 交叉注意力: Query=文本, Key/Value=视觉
-        attn_out, _ = self.cross_attn(query=text, key=vis, value=vis)
+        front = self.front_proj(F_front).unsqueeze(1)   # (B, 1, hidden)
+        down = self.down_proj(F_down).unsqueeze(1)      # (B, 1, hidden)
+        height = self.height_proj(F_height).unsqueeze(1)# (B, 1, hidden)
 
-        # 残差 + FFN
-        fused = self.norm1(text + attn_out).squeeze(1)
-        fused = self.norm2(fused + self.ffn(fused))
+        # 三个上下文 token：
+        # token 0: 前视
+        # token 1: 俯视
+        # token 2: 高度
+        kv = torch.cat([front, down, height], dim=1)    # (B, 3, hidden)
 
-        # 融入高度信息
-        h_alt = self.height_proj(F_height)
-        fused = fused + h_alt
+        query = self.text_proj(F_text).unsqueeze(1)     # (B, 1, hidden)
 
-        return fused, None
+        attn_out, attn_weight = self.cross_attn(
+            query=query,
+            key=kv,
+            value=kv,
+            need_weights=True,
+            average_attn_weights=False,
+        )
+
+        # 残差 + Norm
+        x = self.norm1(query + attn_out)
+
+        # FFN 残差
+        x = self.norm2(x + self.ffn(x))
+
+        fused = x.squeeze(1)  # (B, hidden)
+
+        return fused, attn_weight

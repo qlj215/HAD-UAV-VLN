@@ -1,0 +1,55 @@
+# ============================================================
+# HAD-UAV-VLN 模型配置
+# ============================================================
+# 与 models/had_vln_model.py 的 HADVLNModel.__init__ 参数严格对应。
+# 修改 key 名时需同步更新 model.py 中的构造函数参数名。
+
+model:
+  name: "HAD_VLN"
+
+  # ---- 视觉编码器 ----
+  vision:
+    # self.front_encoder = FrontEncoder(backbone=..., output_dim=...)
+    # self.down_encoder  = DownEncoder(backbone=..., output_dim=...)
+    backbone: "resnet18"        # resnet18 / resnet34 / resnet50 / vit_b_16
+    output_dim: 512             # 投影后的特征维度
+    pretrained: true
+    freeze_bn: true
+    shared: false               # 前视/俯视是否共享编码器权重
+
+  # ---- 文本编码器 ----
+  # self.text_encoder = TextEncoder(vocab_size=..., hidden_dim=...)
+  language:
+    vocab_size: 5000
+    embedding_dim: 300
+    hidden_dim: 512
+    num_layers: 2
+    encoder_type: "lstm"        # lstm / gru / transformer
+    bidirectional: true
+    dropout: 0.3
+
+  # ---- 高度编码器 ----
+  # self.height_encoder = HeightEncoder(hidden_dim=..., min_alt=..., max_alt=...)
+  height:
+    hidden_dim: 64
+    min_alt: 0.0                # 预期最低高度 (m)
+    max_alt: 200.0              # 预期最高高度 (m)
+    num_freqs: 8
+
+  # ---- 融合模块 ----
+  # self.fusion = FUSION_REGISTRY[fusion_type](vis_dim=..., text_dim=..., ...)
+  fusion:
+    fusion_type: "height_cond"  # concat / height_cond / cross_attn
+    hidden_dim: 512
+    num_heads: 8                # 仅 cross_attn 使用
+    dropout: 0.2
+
+  # ---- 策略头 ----
+  # self.policy = MultiHeadPolicy(input_dim=fusion_hidden_dim, ...)
+  policy_head:
+    hidden_dims: [512, 256]
+    dropout: 0.3
+
+  # ---- 辅助任务 ----
+  auxiliary_tasks:
+    progress_monitor: false     # 是否启用轨迹进度预测头

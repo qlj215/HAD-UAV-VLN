@@ -1,0 +1,43 @@
+# ============================================================
+# HAD-UAV-VLN 评估配置
+# ============================================================
+# 与 engine/evaluate.py 配套使用。
+
+evaluation:
+  # ---- 评估参数 ----
+  batch_size: 16               # 评估 batch size (可比训练大)
+  num_workers: 2
+  device: "auto"               # auto / cuda:0 / cpu
+
+  # ---- Stop 判断阈值 ----
+  stop_threshold: 0.5          # sigmoid(stop_logit) > threshold → 判定为 stop
+
+  # ---- 评估 split ----
+  splits:
+    - "val_seen"
+    - "val_unseen"
+    - "test"
+
+  # ---- 评估指标 ----
+  metrics:
+    - "action_mse"             # 动作预测均方误差
+    - "action_mae"             # 动作预测平均绝对误差
+    - "dx_mse"                 # 单维度: dx
+    - "dy_mse"                 # 单维度: dy
+    - "dz_mse"                 # 单维度: dz
+    - "dyaw_mse"               # 单维度: dyaw
+    - "horizontal_mse"         # 水平位移误差
+    - "vertical_mse"           # 垂直位移误差
+    - "stop_accuracy"          # 终点判断准确率
+    - "stop_precision"         # 终点判断精确率
+    - "stop_recall"            # 终点判断召回率
+    - "stop_f1"                # 终点判断 F1
+    - "action_mse_low"         # 低空动作 MSE
+    - "action_mse_mid"         # 中空动作 MSE
+    - "action_mse_high"        # 高空动作 MSE
+
+  # ---- 输出 ----
+  output:
+    eval_overall: "eval_overall.json"
+    eval_by_height: "eval_by_height.json"
+    predictions: "predictions.jsonl"

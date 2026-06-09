@@ -1,0 +1,52 @@
+# ============================================================
+# HAD-UAV-VLN 数据配置
+# ============================================================
+# 与 data_tools/convert_dataset.py 和 datasets/had_dataset.py 配套使用。
+# 修改阈值后需重新运行 convert_dataset.py 生成新的 height_stage 标注。
+
+dataset:
+  name: "HAD_UAV_VLN"
+
+# ---- 原始数据路径 (TravelUAV 格式) ----
+raw_data:
+  trajectory_dir: "./data/raw/trajectories/"
+  instruction_file: "./data/raw/instructions.json"
+  image_dir: "./data/raw/images/"
+
+# ---- 处理后数据路径 (JSONL 格式) ----
+processed_data:
+  save_dir: "./data/processed/"
+  train_anno: "train.jsonl"
+  val_seen_anno: "val_seen.jsonl"
+  val_unseen_anno: "val_unseen.jsonl"
+  test_anno: "test.jsonl"
+
+# ---- 视角配置 ----
+perspectives:
+  egocentric: true
+  birdview: true
+
+# ---- 图像参数 ----
+image:
+  resolution: [224, 224]
+  normalization:
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+
+# ---- 指令参数 ----
+instruction:
+  max_length: 80
+  vocab_size: 5000
+
+# ---- 高度分段阈值 (与 convert_dataset.py 保持一致) ----
+# low:  altitude < 10m
+# mid:  10m <= altitude < 30m
+# high: altitude >= 30m
+height_stage:
+  thresholds: [10.0, 30.0]
+  labels: ["low", "mid", "high"]
+
+# ---- 轨迹参数 ----
+trajectory:
+  max_len: 100
+  min_len: 2

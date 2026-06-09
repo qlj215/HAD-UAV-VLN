@@ -23,11 +23,11 @@ HAD-UAV-VLN 完整模型封装。
 
   # 训练前向
   outputs = model(front_img, down_img, instruction, altitude)
-  # → {"pred_action": (B,4), "gate_weight": (B,2), ...}
+  # → {"pred_action": (B,4), "stop_logit":  (B, 1), "gate_weight": (B,2), ...}
 
   # 推理
   result = model.predict_action(front_img, down_img, instruction, altitude)
-  # → {"action": (B,4), "gate_weight": (B,2)}
+  # → {"action": (B,4), "stop_logit": (B, 1), "gate_weight": (B,2)}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   使用示例
@@ -184,6 +184,7 @@ class HADVLNModel(nn.Module):
         # ---- 策略头 ----
         self.policy = MultiHeadPolicy(
             input_dim=fusion_hidden_dim,
+            policy_hidden_dims=policy_hidden_dims,
             use_progress_monitor=use_progress_monitor,
             dropout=dropout,
         )
@@ -200,17 +201,19 @@ class HADVLNModel(nn.Module):
         down_image: torch.Tensor,
         instruction: torch.Tensor,
         altitude: torch.Tensor,
+        return_features: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """
         Args:
             front_image: (B, 3, H, W)  前视图
             down_image:  (B, 3, H, W)  俯视图
             instruction: (B, max_len)  指令 token IDs
-            altitude:    (B,)          高度值 (m)
+            altitude:    (B,) 或 (B, 1)         高度值 (m)
 
         Returns:
             dict with:
               - pred_action:  (B, 4)  预测动作 [dx, dy, dz, dyaw]
+              - stop_logit:   (B, 1)  停止判断原始 logit
               - gate_weight:  (B, 2)  门控权重 [α_front, α_down] (仅 height_cond)
               - height_feat:  (B, H)  高度特征
               - front_feat:   (B, D)  前视特征
@@ -224,17 +227,25 @@ class HADVLNModel(nn.Module):
         F_height = self.height_encoder(altitude)           # (B, height_dim)
 
         # 2. 融合
-        fused, gate = self.fusion(F_front, F_down, F_text, F_height)
+        fused, fusion_aux = self.fusion(F_front, F_down, F_text, F_height)
         # fused: (B, fusion_dim), gate: (B, 2) or None
 
         # 3. 策略输出
         outputs = self.policy(fused)
 
+        if self.fusion_type == "height_cond":
+            outputs["gate_weight"] = fusion_aux
+
+        elif self.fusion_type == "cross_attn":
+            outputs["attn_weight"] = fusion_aux
+
         # 附加中间特征 (供分析和辅助损失使用)
-        outputs["gate_weight"] = gate
-        outputs["height_feat"] = F_height
-        outputs["front_feat"] = F_front
-        outputs["down_feat"] = F_down
+        if return_features:
+            outputs["height_feat"] = F_height
+            outputs["front_feat"] = F_front
+            outputs["down_feat"] = F_down
+            outputs["text_feat"] = F_text
+            outputs["fused_feat"] = fused
 
         return outputs
 
@@ -245,17 +256,39 @@ class HADVLNModel(nn.Module):
         down_image: torch.Tensor,
         instruction: torch.Tensor,
         altitude: torch.Tensor,
+        stop_threshold: float = 0.7,
     ) -> Dict[str, torch.Tensor]:
-        """推理模式: 预测单个/批次动作。
+        """推理模式: 预测单个/批次动作。"""
 
-        Returns:
-            dict with:
-              - action:      (B, 4)  预测动作
-              - gate_weight: (B, 2)  门控权重 (仅 height_cond)
-        """
+        was_training = self.training
         self.eval()
-        outputs = self.forward(front_image, down_image, instruction, altitude)
-        return {
+
+        outputs = self.forward(
+            front_image,
+            down_image,
+            instruction,
+            altitude,
+            return_features=False,
+        )
+
+        stop_logit = outputs.get("stop_logit")
+        stop_prob = torch.sigmoid(stop_logit) if stop_logit is not None else None
+        stop = stop_prob > stop_threshold if stop_prob is not None else None
+
+        result = {
             "action": outputs["pred_action"],
-            "gate_weight": outputs.get("gate_weight"),
+            "stop_logit": stop_logit,
+            "stop_prob": stop_prob,
+            "stop": stop,
         }
+
+        if "gate_weight" in outputs:
+            result["gate_weight"] = outputs["gate_weight"]
+
+        if "attn_weight" in outputs:
+            result["attn_weight"] = outputs["attn_weight"]
+
+        if was_training:
+            self.train()
+
+        return result
