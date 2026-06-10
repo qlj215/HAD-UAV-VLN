@@ -1,40 +1,29 @@
 """
 metrics.py
 ==========
-HAD-UAV-VLN 评估指标计算。
+HAD-UAV-VLN evaluation metrics.
 
-包含:
-  1. 动作预测误差 (Action MSE / MAE)
-  2. Stop 分类指标 (Accuracy / Precision / Recall)
-  3. 高度分层指标 (按 low / mid / high 拆分)
-  4. 单维度误差 (dx / dy / dz / dyaw)
+This module provides two metric layers:
+  1. Action-level metrics that can be computed from offline JSONL batches.
+  2. Trajectory-level metric interfaces for NE/SR/OSR/SPL.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  使用示例
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  from engine.metrics import compute_metrics, aggregate_epoch_metrics
-
-  metrics = compute_metrics(
-      pred_action=outputs["pred_action"],      # (N, 4)
-      gt_action=batch["action"],                # (N, 4)
-      stop_logit=outputs.get("stop_logit"),     # (N, 1)
-      gt_done=batch["done"],                    # (N,)
-      altitude=batch["altitude"],               # (N,)
-      height_stage=batch["height_stage"],       # (N,)  {0:low,1:mid,2:high}
-  )
-  # → {"action_mse": 0.12, "stop_accuracy": 0.85, ...}
+Trajectory-level metrics require an online simulator/environment because the
+next observation depends on the predicted action. Until a simulator is passed
+in, the full trajectory metric set is returned as None so JSON outputs store
+these values as null instead of reporting misleading offline approximations.
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 
 
-# ---- 高度分段常量 (与 convert_dataset.py 一致) ----
 LOW_ALT_MAX = 10.0
 MID_ALT_MAX = 30.0
 STAGE2NAME = {0: "low", 1: "mid", 2: "high"}
+STAGE_NAME_TO_ID = {v: k for k, v in STAGE2NAME.items()}
+TRAJECTORY_METRICS = ("ne", "sr", "osr", "spl")
+TRAJECTORY_STAGES = ("high", "mid", "low")
 
 
 def compute_metrics(
@@ -44,33 +33,23 @@ def compute_metrics(
     gt_done: Optional[torch.Tensor] = None,
     altitude: Optional[torch.Tensor] = None,
     height_stage: Optional[torch.Tensor] = None,
+    stop_threshold: float = 0.5,
 ) -> Dict[str, float]:
-    """计算单批次评估指标。
+    """Compute action-level metrics for one batch."""
+    metrics: Dict[str, float] = {}
 
-    Args:
-        pred_action:  (N, 4)  预测动作 [dx, dy, dz, dyaw]
-        gt_action:    (N, 4)  真实动作
-        stop_logit:   (N, 1)  stop 原始 logit (未过 sigmoid)
-        gt_done:      (N,)    是否终点 (0/1, float)
-        altitude:     (N,)    高度值 (m)
-        height_stage: (N,)    高度分段 {0:low, 1:mid, 2:high}
-
-    Returns:
-        metrics dict, 所有值均为 Python float
-    """
-    metrics = {}
-
-    # ---- 动作误差 (仅非终点步) ----
     if gt_done is not None:
         not_done = (gt_done < 0.5).squeeze()
     else:
-        not_done = torch.ones(pred_action.size(0), dtype=torch.bool, device=pred_action.device)
+        not_done = torch.ones(
+            pred_action.size(0), dtype=torch.bool, device=pred_action.device
+        )
 
     action_count = not_done.sum().item()
     if action_count > 0:
         diff = pred_action[not_done] - gt_action[not_done]
-        mse_per_dim = (diff ** 2).mean(dim=0)           # (4,)
-        mae_per_dim = diff.abs().mean(dim=0)            # (4,)
+        mse_per_dim = (diff ** 2).mean(dim=0)
+        mae_per_dim = diff.abs().mean(dim=0)
 
         metrics["action_mse"] = mse_per_dim.mean().item()
         metrics["action_mae"] = mae_per_dim.mean().item()
@@ -82,44 +61,37 @@ def compute_metrics(
         metrics["dy_mae"] = mae_per_dim[1].item()
         metrics["dz_mae"] = mae_per_dim[2].item()
         metrics["dyaw_mae"] = mae_per_dim[3].item()
-
-        # 水平位移误差 (dx,dy) 和垂直位移误差 (dz)
         metrics["horizontal_mse"] = (mse_per_dim[0] + mse_per_dim[1]).item()
         metrics["vertical_mse"] = mse_per_dim[2].item()
 
-        # 高度分层指标
         if height_stage is not None:
-            for stage_id in [0, 1, 2]:
-                stage_name = STAGE2NAME[stage_id]
-                mask = (height_stage[not_done] == stage_id)
+            for stage_id, stage_name in STAGE2NAME.items():
+                mask = height_stage[not_done] == stage_id
                 if mask.sum() > 0:
                     stage_diff = diff[mask]
-                    metrics[f"action_mse_{stage_name}"] = (
-                        (stage_diff ** 2).mean().item()
-                    )
-                    metrics[f"action_mae_{stage_name}"] = (
-                        stage_diff.abs().mean().item()
-                    )
+                    metrics[f"action_mse_{stage_name}"] = (stage_diff ** 2).mean().item()
+                    metrics[f"action_mae_{stage_name}"] = stage_diff.abs().mean().item()
                     metrics[f"action_count_{stage_name}"] = mask.sum().item()
                 else:
                     metrics[f"action_mse_{stage_name}"] = 0.0
                     metrics[f"action_mae_{stage_name}"] = 0.0
                     metrics[f"action_count_{stage_name}"] = 0
     else:
-        # 全部是终点 — 无法计算动作误差
-        for k in ["action_mse", "action_mae", "dx_mse", "dy_mse", "dz_mse", "dyaw_mse",
-                  "dx_mae", "dy_mae", "dz_mae", "dyaw_mae", "horizontal_mse", "vertical_mse"]:
-            metrics[k] = 0.0
-        for stage_id in [0, 1, 2]:
-            sn = STAGE2NAME[stage_id]
-            for k in [f"action_mse_{sn}", f"action_mae_{sn}", f"action_count_{sn}"]:
-                metrics[k] = 0.0 if "count" not in k else 0
+        for key in [
+            "action_mse", "action_mae", "dx_mse", "dy_mse", "dz_mse",
+            "dyaw_mse", "dx_mae", "dy_mae", "dz_mae", "dyaw_mae",
+            "horizontal_mse", "vertical_mse",
+        ]:
+            metrics[key] = 0.0
+        for stage_name in STAGE2NAME.values():
+            metrics[f"action_mse_{stage_name}"] = 0.0
+            metrics[f"action_mae_{stage_name}"] = 0.0
+            metrics[f"action_count_{stage_name}"] = 0
 
-    # ---- Stop 分类指标 ----
     if stop_logit is not None and gt_done is not None:
-        stop_prob = torch.sigmoid(stop_logit).squeeze()   # (N,)
-        stop_pred = (stop_prob > 0.5).float()              # (N,)
-        gt_done_flat = gt_done.float().squeeze()           # (N,)
+        stop_prob = torch.sigmoid(stop_logit).squeeze()
+        stop_pred = (stop_prob > stop_threshold).float()
+        gt_done_flat = gt_done.float().squeeze()
 
         tp = ((stop_pred == 1) & (gt_done_flat == 1)).sum().item()
         tn = ((stop_pred == 0) & (gt_done_flat == 0)).sum().item()
@@ -127,8 +99,7 @@ def compute_metrics(
         fn = ((stop_pred == 0) & (gt_done_flat == 1)).sum().item()
 
         total = stop_pred.size(0)
-        correct = tp + tn
-        metrics["stop_accuracy"] = correct / max(total, 1)
+        metrics["stop_accuracy"] = (tp + tn) / max(total, 1)
         metrics["stop_precision"] = tp / max(tp + fp, 1)
         metrics["stop_recall"] = tp / max(tp + fn, 1)
         metrics["stop_f1"] = (
@@ -142,46 +113,112 @@ def compute_metrics(
 
     metrics["num_samples"] = pred_action.size(0)
     metrics["num_action_samples"] = action_count
-
     return metrics
 
 
 def aggregate_epoch_metrics(
     batch_metrics_list: List[Dict[str, float]],
 ) -> Dict[str, float]:
-    """将多个 batch 的指标聚合为 epoch 级指标。
-
-    加权方式: 按样本数加权平均, 确保大 batch 和小 batch 得到公平对待。
-
-    Args:
-        batch_metrics_list: compute_metrics() 返回的字典列表
-
-    Returns:
-        聚合后的指标字典
-    """
+    """Aggregate batch-level action metrics into epoch-level metrics."""
     if not batch_metrics_list:
         return {}
 
-    # 按样本数加权
     total_samples = sum(m.get("num_samples", 0) for m in batch_metrics_list)
     if total_samples == 0:
-        # fallback: 简单平均
         keys = {k for m in batch_metrics_list for k in m if k != "num_samples"}
-        return {k: sum(m.get(k, 0.0) for m in batch_metrics_list) / len(batch_metrics_list)
-                for k in keys}
+        return {
+            k: sum(m.get(k, 0.0) for m in batch_metrics_list) / len(batch_metrics_list)
+            for k in keys
+        }
 
-    result = {}
-    for m in batch_metrics_list:
-        w = m.get("num_samples", 0) / max(total_samples, 1)
-        for k, v in m.items():
-            if k == "num_samples":
+    result: Dict[str, float] = {}
+    for metrics in batch_metrics_list:
+        weight = metrics.get("num_samples", 0) / max(total_samples, 1)
+        for key, value in metrics.items():
+            if key == "num_samples":
                 continue
-            if k not in result:
-                result[k] = 0.0
-            result[k] += v * w
+            result[key] = result.get(key, 0.0) + value * weight
 
     result["num_samples"] = total_samples
     return result
+
+
+def trajectory_metric_keys(prefix: str = "trajectory") -> List[str]:
+    """Return the canonical 16 trajectory metric keys."""
+    keys = [f"{prefix}_{metric}" for metric in TRAJECTORY_METRICS]
+    for stage in TRAJECTORY_STAGES:
+        keys.extend(f"{prefix}_{stage}_{metric}" for metric in TRAJECTORY_METRICS)
+    return keys
+
+
+def null_trajectory_metrics(prefix: str = "trajectory") -> Dict[str, Optional[float]]:
+    """Return all 16 trajectory metrics as None/null placeholders."""
+    return {key: None for key in trajectory_metric_keys(prefix)}
+
+
+def normalize_trajectory_metrics(
+    metrics: Optional[Dict[str, Any]],
+    prefix: str = "trajectory",
+) -> Dict[str, Optional[float]]:
+    """Keep the trajectory metric schema stable even if a simulator omits keys."""
+    normalized = null_trajectory_metrics(prefix)
+    if not metrics:
+        return normalized
+    for key in normalized:
+        if key in metrics:
+            normalized[key] = metrics[key]
+    return normalized
+
+
+def trajectory_stage_from_start(sample: Dict[str, Any]) -> Optional[str]:
+    """Return high/mid/low for a trajectory using its first step."""
+    stage = sample.get("height_stage")
+    if isinstance(stage, str):
+        stage = stage.lower()
+        return stage if stage in TRAJECTORY_STAGES else None
+    if isinstance(stage, int):
+        return STAGE2NAME.get(stage)
+    return None
+
+
+def compute_trajectory_metrics(
+    samples: Optional[Sequence[Dict[str, Any]]] = None,
+    simulator: Optional[Any] = None,
+    success_threshold: float = 20.0,
+    stop_threshold: float = 0.5,
+    max_steps: int = 200,
+    prefix: str = "trajectory",
+) -> Dict[str, Optional[float]]:
+    """Compute trajectory-level NE/SR/OSR/SPL metrics.
+
+    Current project state has no simulator. Offline JSONL frames cannot provide
+    new observations after a predicted action, so returning real trajectory
+    scores here would be misleading. When a simulator is later provided, it may
+    expose `compute_trajectory_metrics(...)` and return the same 16-key schema.
+    """
+    if simulator is None:
+        return null_trajectory_metrics(prefix)
+
+    if not hasattr(simulator, "compute_trajectory_metrics"):
+        return null_trajectory_metrics(prefix)
+
+    raw_metrics = simulator.compute_trajectory_metrics(
+        samples=samples or [],
+        success_threshold=success_threshold,
+        stop_threshold=stop_threshold,
+        max_steps=max_steps,
+        stage_by="start",
+    )
+    return normalize_trajectory_metrics(raw_metrics, prefix)
+
+
+def format_nullable_metric(value: Optional[float], precision: int = 4) -> str:
+    """Format metric values for command-line logs."""
+    if value is None:
+        return "null"
+    if isinstance(value, float):
+        return f"{value:.{precision}f}"
+    return str(value)
 
 
 def compute_action_mse_only(
@@ -189,16 +226,7 @@ def compute_action_mse_only(
     gt_action: torch.Tensor,
     gt_done: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """仅计算动作 MSE (用于训练时的快速监控)。
-
-    Args:
-        pred_action: (B, 4)
-        gt_action:   (B, 4)
-        gt_done:     (B,)  可选, 如果提供则排除终点步
-
-    Returns:
-        标量 tensor (保留 grad)
-    """
+    """Compute action MSE, optionally ignoring terminal steps."""
     if gt_done is not None:
         not_done = (gt_done < 0.5).squeeze()
         if not_done.sum() == 0:
@@ -206,5 +234,4 @@ def compute_action_mse_only(
         diff = pred_action[not_done] - gt_action[not_done]
     else:
         diff = pred_action - gt_action
-
     return (diff ** 2).mean()

@@ -6,8 +6,8 @@
 
 training:
   # ---- 基础参数 ----
-  epochs: 30                   # 训练轮数
-  batch_size: 16               # 小数据集用较小 batch
+  epochs: 100                   # 训练轮数
+  batch_size: 1024               # 小数据集用较小 batch
   num_workers: 2               # DataLoader 子进程数
 
   # ---- 优化器 ----
@@ -41,9 +41,9 @@ training:
 
   # ---- 日志与保存 ----
   logging:
-    log_interval: 10           # 每 N 个 batch 打印一次
-    eval_interval: 5           # 每 N 个 epoch 验证一次
-    save_interval: 5           # 每 N 个 epoch 保存检查点
+    log_interval: 100           # 每 N 个 batch 打印一次
+    eval_interval: 10           # 每 N 个 epoch 验证一次
+    save_interval: 10           # 每 N 个 epoch 保存检查点
 
   # ---- 随机种子 ----
   seed: 42
@@ -52,6 +52,6 @@ training:
   # 优先级: 命令行 --output_dir > output.dir > output.root_dir/output.run_name
   # run_name 留空时，train.py 默认使用当前时间戳。
   output:
-    root_dir: "./output"
+    root_dir: "./outputs"
     run_name: null
     dir: null

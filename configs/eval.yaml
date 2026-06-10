@@ -10,7 +10,16 @@ evaluation:
   device: "auto"               # auto / cuda:0 / cpu
 
   # ---- Stop 判断阈值 ----
-  stop_threshold: 0.5          # sigmoid(stop_logit) > threshold → 判定为 stop
+  stop_threshold: 0.5          # sigmoid(stop_logit) > threshold -> 判定为 stop
+
+  # ---- 轨迹评估条件 ----
+  trajectory:
+    success_threshold: 20.0    # NE <= threshold 判定为成功
+    max_steps: 200             # 在线模拟器评估时的最大步数
+
+  # ---- 输入尺寸 ----
+  image_size: [224, 224]
+  max_inst_len: 80
 
   # ---- 评估 split ----
   splits:
@@ -37,7 +46,11 @@ evaluation:
     - "action_mse_high"        # 高空动作 MSE
 
   # ---- 输出 ----
+  # evaluate.py 默认保存到: root_dir/YYYYmmdd_HHMMSS/
   output:
+    root_dir: "./eval_outputs"
+    config: "config.json"
     eval_overall: "eval_overall.json"
+    eval_trajectory: "eval_trajectory.json"
     eval_by_height: "eval_by_height.json"
     predictions: "predictions.jsonl"

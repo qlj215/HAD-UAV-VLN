@@ -28,6 +28,7 @@ HAD-UAV-VLN 训练引擎。
 import argparse
 import json
 import os
+import platform
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -50,7 +51,13 @@ import yaml
 from datasets.had_dataset import HADDataset, had_collate_fn
 from datasets.transforms import get_train_transforms, get_val_transforms
 from models.had_vln_model import HADVLNModel
-from engine.metrics import compute_metrics, aggregate_epoch_metrics
+from engine.metrics import (
+    aggregate_epoch_metrics,
+    compute_metrics,
+    compute_trajectory_metrics,
+    format_nullable_metric,
+    trajectory_metric_keys,
+)
 
 
 # ================================================================
@@ -68,6 +75,7 @@ class Trainer:
         config: Dict[str, Any],
         device: torch.device,
         output_dir: Path,
+        run_config: Optional[Dict[str, Any]] = None,
     ):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -136,7 +144,8 @@ class Trainer:
         self.train_log: list = []
 
         # ---- 目录 ----
-        self.run_dir = output_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
+        # self.run_dir = output_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.run_dir = output_dir
 
         self.ckpt_dir = self.run_dir / "checkpoints"
         self.log_dir = self.run_dir / "logs"
@@ -144,6 +153,53 @@ class Trainer:
 
         for d in [self.ckpt_dir, self.log_dir, self.results_dir]:
             d.mkdir(parents=True, exist_ok=True)
+
+        self._save_run_config(run_config or {})
+
+    def _save_run_config(self, run_config: Dict[str, Any]) -> None:
+        snapshot = dict(run_config)
+        snapshot["saved_at"] = datetime.now().isoformat(timespec="seconds")
+        snapshot["outputs"] = {
+            "run_dir": str(self.run_dir),
+            "run_dir_abs": str(self.run_dir.resolve()),
+            "config": str(self.run_dir / "config.json"),
+            "checkpoints": str(self.ckpt_dir),
+            "logs": str(self.log_dir),
+            "results": str(self.results_dir),
+        }
+        snapshot["optimizer_runtime"] = {
+            "class": self.optimizer.__class__.__name__,
+            "param_groups": [
+                {
+                    key: _json_ready(value)
+                    for key, value in group.items()
+                    if key != "params"
+                }
+                for group in self.optimizer.param_groups
+            ],
+        }
+        snapshot["scheduler_runtime"] = {
+            "class": self.scheduler.__class__.__name__ if self.scheduler is not None else None,
+            "warmup_epochs": self._warmup_epochs,
+            "warmup_steps": self._warmup_steps,
+        }
+        snapshot["loss_runtime"] = {
+            "action_weight": self.action_weight,
+            "stop_weight": self.stop_weight,
+            "progress_weight": self.progress_weight,
+            "use_progress": self.use_progress,
+            "use_amp": self.use_amp,
+            "grad_clip_enabled": self.grad_clip_enabled,
+            "grad_clip_norm": self.grad_clip_norm,
+        }
+
+        path = self.run_dir / "config.json"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(_json_ready(snapshot), f, indent=2, ensure_ascii=False)
+            print(f"  [CONFIG] {path}")
+        except Exception as exc:
+            print(f"  [WARN] Failed to save run config to {path}: {exc}")
 
     # ---- 优化器构建 ----
 
@@ -337,6 +393,27 @@ class Trainer:
         epoch_metrics["val_loss"] = val_loss
         return epoch_metrics
 
+    def compute_trajectory_metrics_for_loader(
+        self,
+        dataloader: DataLoader,
+    ) -> Dict[str, Optional[float]]:
+        return compute_trajectory_metrics(
+            samples=getattr(dataloader.dataset, "samples", []),
+            simulator=None,
+            success_threshold=20.0,
+            stop_threshold=0.5,
+            max_steps=200,
+        )
+
+    def _print_trajectory_metrics(
+        self,
+        split_name: str,
+        metrics: Dict[str, Optional[float]],
+    ) -> None:
+        print(f"  {split_name} trajectory metrics:")
+        for key in trajectory_metric_keys():
+            print(f"    {key}: {format_nullable_metric(metrics.get(key))}")
+
     # ---- 主训练循环 ----
 
     def fit(self, epochs: int):
@@ -365,7 +442,12 @@ class Trainer:
             # 验证
             if epoch % self.eval_interval == 0:
                 val_metrics = self.validate()
+                train_trajectory_metrics = self.compute_trajectory_metrics_for_loader(self.train_loader)
+                val_trajectory_metrics = self.compute_trajectory_metrics_for_loader(self.val_loader)
+
                 train_log_entry["val"] = val_metrics
+                train_log_entry["train_trajectory"] = train_trajectory_metrics
+                train_log_entry["val_trajectory"] = val_trajectory_metrics
 
                 val_loss = val_metrics.get("val_loss", float("inf"))
                 print(f"  Epoch {epoch:3d}/{epochs} | "
@@ -373,6 +455,8 @@ class Trainer:
                       f"val_loss={val_loss:.4f} | "
                       f"action_mse={val_metrics.get('action_mse', 0):.4f} | "
                       f"stop_acc={val_metrics.get('stop_accuracy', 0):.3f}")
+                self._print_trajectory_metrics("train", train_trajectory_metrics)
+                self._print_trajectory_metrics("val", val_trajectory_metrics)
 
                 # Plateau scheduler
                 if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
@@ -465,6 +549,107 @@ def resolve_output_dir(cli_output_dir: Optional[str], train_cfg: dict) -> Path:
     if not run_name:
         run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
     return Path(root_dir) / run_name
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _json_ready(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(v) for v in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, torch.device):
+        return str(value)
+    if torch.is_tensor(value):
+        if value.numel() == 1:
+            return value.detach().cpu().item()
+        return value.detach().cpu().tolist()
+    return value
+
+
+def _model_parameter_summary(model: nn.Module) -> Dict[str, Any]:
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return {
+        "class": model.__class__.__name__,
+        "fusion_type": getattr(model, "fusion_type", None),
+        "num_parameters": total,
+        "num_trainable_parameters": trainable,
+        "num_frozen_parameters": total - trainable,
+    }
+
+
+def build_train_config_snapshot(
+    args: argparse.Namespace,
+    config: Dict[str, Any],
+    data_dir: str,
+    img_size: Tuple[int, int],
+    batch_size: int,
+    num_workers: int,
+    train_ds: HADDataset,
+    val_ds: HADDataset,
+    model: HADVLNModel,
+    device: torch.device,
+    output_dir: Path,
+) -> Dict[str, Any]:
+    train_jsonl = Path(data_dir) / "train.jsonl"
+    val_jsonl = Path(data_dir) / "val_seen.jsonl"
+    return {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "command": " ".join(sys.argv),
+        "cwd": str(Path.cwd()),
+        "cli_args": vars(args),
+        "config_files": {
+            "data_config": str(Path(args.data_config)),
+            "data_config_abs": str(Path(args.data_config).resolve()),
+            "model_config": str(Path(args.model_config)),
+            "model_config_abs": str(Path(args.model_config).resolve()),
+            "train_config": str(Path(args.train_config)),
+            "train_config_abs": str(Path(args.train_config).resolve()),
+        },
+        "paths": {
+            "data_dir": data_dir,
+            "data_dir_abs": str(Path(data_dir).resolve()),
+            "train_jsonl": str(train_jsonl),
+            "val_jsonl": str(val_jsonl),
+            "output_root": str(output_dir),
+            "output_root_abs": str(output_dir.resolve()),
+            "resume": args.resume,
+        },
+        "runtime": {
+            "python_version": sys.version,
+            "platform": platform.platform(),
+            "torch_version": torch.__version__,
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_device_count": torch.cuda.device_count(),
+            "device_arg": args.device,
+            "resolved_device": str(device),
+        },
+        "data": {
+            "config": config.get("data", {}),
+            "image_size": list(img_size),
+            "instruction_max_length": config.get("data", {}).get("instruction", {}).get("max_length", 80),
+            "train_samples": len(train_ds),
+            "val_samples": len(val_ds),
+            "batch_size": batch_size,
+            "num_workers": num_workers,
+            "pin_memory": True,
+            "train_shuffle": True,
+            "val_shuffle": False,
+            "train_transform": "get_train_transforms",
+            "val_transform": "get_val_transforms",
+        },
+        "model": {
+            "config": config.get("model", {}),
+            "summary": _model_parameter_summary(model),
+        },
+        "training": {
+            "config": config.get("training", {}),
+            "epochs": config.get("training", {}).get("epochs", 100),
+            "batch_size": batch_size,
+            "num_workers": num_workers,
+        },
+    }
 
 
 def build_model_from_config(model_cfg: dict) -> HADVLNModel:
@@ -603,6 +788,19 @@ def main():
 
     # ---- 输出目录 ----
     output_dir = resolve_output_dir(args.output_dir, train_cfg)
+    run_config = build_train_config_snapshot(
+        args=args,
+        config=config,
+        data_dir=data_dir,
+        img_size=img_size,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        train_ds=train_ds,
+        val_ds=val_ds,
+        model=model,
+        device=device,
+        output_dir=output_dir,
+    )
 
     # ---- 训练 ----
     trainer = Trainer(
@@ -612,6 +810,7 @@ def main():
         config=config,
         device=device,
         output_dir=output_dir,
+        run_config=run_config,
     )
 
     if args.resume:

@@ -11,20 +11,24 @@ HAD-UAV-VLN 模型评估工具。
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   python engine/evaluate.py \
-    --checkpoint outputs/checkpoints/best_model.pth \
+    --checkpoint pth模型地址 \
     --data_dir ./data/processed \
     --split val_unseen \
-    --out_dir outputs/results
+    --eval_config configs/eval.yaml
+
+  # 默认结果目录: ./eval_outputs/YYYYmmdd_HHMMSS/
 """
 
 import argparse
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
+import yaml
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -35,7 +39,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from datasets.had_dataset import HADDataset, had_collate_fn
 from datasets.transforms import get_val_transforms
 from models.had_vln_model import HADVLNModel
-from engine.metrics import compute_metrics, aggregate_epoch_metrics
+from engine.metrics import aggregate_epoch_metrics, compute_metrics, compute_trajectory_metrics
 
 
 def evaluate_split(
@@ -44,7 +48,11 @@ def evaluate_split(
     device: torch.device,
     output_dir: Path,
     save_predictions: bool = True,
-) -> Dict[str, float]:
+    output_files: Optional[Dict[str, str]] = None,
+    success_threshold: float = 20.0,
+    stop_threshold: float = 0.5,
+    max_steps: int = 200,
+) -> Dict[str, Any]:
     """在单个 split 上运行评估。
 
     Args:
@@ -81,6 +89,7 @@ def evaluate_split(
             gt_done=batch["done"].to(device),
             altitude=batch["altitude"].to(device),
             height_stage=batch["height_stage"].to(device),
+            stop_threshold=stop_threshold,
         )
         all_batch_metrics.append(m)
 
@@ -106,15 +115,31 @@ def evaluate_split(
 
     # 聚合
     overall_metrics = aggregate_epoch_metrics(all_batch_metrics)
+    trajectory_metrics = compute_trajectory_metrics(
+        samples=getattr(dataloader.dataset, "samples", []),
+        simulator=None,
+        success_threshold=success_threshold,
+        stop_threshold=stop_threshold,
+        max_steps=max_steps,
+    )
+    overall_metrics.update(trajectory_metrics)
 
     # 保存
     output_dir.mkdir(parents=True, exist_ok=True)
+    output_files = output_files or {}
+    eval_overall_name = output_files.get("eval_overall", "eval_overall.json")
+    eval_trajectory_name = output_files.get("eval_trajectory", "eval_trajectory.json")
+    eval_by_height_name = output_files.get("eval_by_height", "eval_by_height.json")
+    predictions_name = output_files.get("predictions", "predictions.jsonl")
 
-    with open(output_dir / "eval_overall.json", "w") as f:
+    with open(output_dir / eval_overall_name, "w") as f:
         json.dump(overall_metrics, f, indent=2, ensure_ascii=False)
 
+    with open(output_dir / eval_trajectory_name, "w") as f:
+        json.dump(trajectory_metrics, f, indent=2, ensure_ascii=False)
+
     if save_predictions:
-        with open(output_dir / "predictions.jsonl", "w") as f:
+        with open(output_dir / predictions_name, "w") as f:
             for pred in all_predictions:
                 f.write(json.dumps(pred, ensure_ascii=False) + "\n")
 
@@ -124,10 +149,110 @@ def evaluate_split(
     )}
     if height_keys:
         height_metrics = {k: overall_metrics[k] for k in sorted(height_keys)}
-        with open(output_dir / "eval_by_height.json", "w") as f:
+        with open(output_dir / eval_by_height_name, "w") as f:
             json.dump(height_metrics, f, indent=2, ensure_ascii=False)
 
     return overall_metrics
+
+
+def load_yaml(path: str) -> dict:
+    if not path:
+        return {}
+    cfg_path = Path(path)
+    if not cfg_path.exists():
+        return {}
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def unwrap_config_section(cfg: dict, section: str) -> dict:
+    nested = cfg.get(section)
+    return nested if isinstance(nested, dict) else cfg
+
+
+def resolve_eval_output_dir(cli_out_dir: Optional[str], eval_cfg: dict) -> Path:
+    """Resolve result directory: CLI exact dir > eval.yaml root/run_name > ./eval_outputs/time."""
+    if cli_out_dir:
+        return Path(cli_out_dir)
+
+    output_cfg = eval_cfg.get("output", {})
+    root_dir = output_cfg.get("root_dir", "./eval_outputs")
+    run_name = output_cfg.get("run_name")
+    if not run_name:
+        run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return Path(root_dir) / run_name
+
+
+def build_eval_config_snapshot(
+    args: argparse.Namespace,
+    eval_cfg: dict,
+    output_dir: Path,
+    split: str,
+    split_file: str,
+    data_dir: Path,
+    batch_size: int,
+    num_workers: int,
+    device_name: str,
+    device: torch.device,
+    image_size: List[int],
+    max_inst_len: int,
+    success_threshold: float,
+    stop_threshold: float,
+    max_steps: int,
+    output_files: Dict[str, str],
+    num_samples: int,
+) -> Dict[str, Any]:
+    """Build a JSON-serializable snapshot of this evaluation run."""
+    return {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "command": " ".join(sys.argv),
+        "cli_args": vars(args),
+        "config_file": args.eval_config,
+        "config_from_yaml": eval_cfg,
+        "paths": {
+            "checkpoint": args.checkpoint,
+            "checkpoint_abs": str(Path(args.checkpoint).expanduser().resolve()),
+            "data_dir": str(data_dir),
+            "data_dir_abs": str(data_dir.expanduser().resolve()),
+            "split_file": split_file,
+            "split_file_abs": str((data_dir / split_file).expanduser().resolve()),
+            "output_dir": str(output_dir),
+            "output_dir_abs": str(output_dir.expanduser().resolve()),
+        },
+        "data": {
+            "split": split,
+            "num_samples": num_samples,
+            "image_size": image_size,
+            "max_inst_len": max_inst_len,
+        },
+        "model": {
+            "checkpoint": args.checkpoint,
+        },
+        "evaluation": {
+            "batch_size": batch_size,
+            "num_workers": num_workers,
+            "device": device_name,
+            "resolved_device": str(device),
+            "save_predictions": True,
+            "success_threshold": success_threshold,
+            "stop_threshold": stop_threshold,
+            "max_steps": max_steps,
+        },
+        "output_files": output_files,
+    }
+
+
+def save_eval_config_snapshot(
+    output_dir: Path,
+    snapshot: Dict[str, Any],
+    output_files: Optional[Dict[str, str]] = None,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    filename = (output_files or {}).get("config", "config.json")
+    path = output_dir / filename
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, indent=2, ensure_ascii=False)
+    return path
 
 
 def build_model_from_checkpoint(ckpt_path: str, device: torch.device) -> HADVLNModel:
@@ -173,49 +298,99 @@ def main():
     parser = argparse.ArgumentParser(description="HAD-UAV-VLN 模型评估")
     parser.add_argument("--checkpoint", type=str, required=True, help="模型检查点路径")
     parser.add_argument("--data_dir", type=str, required=True, help="处理后数据目录")
-    parser.add_argument("--split", type=str, default="val_seen",
+    parser.add_argument("--eval_config", type=str, default="configs/eval.yaml", help="评估配置文件")
+    parser.add_argument("--split", type=str, default=None,
                         choices=["train", "val_seen", "val_unseen", "test"],
                         help="评估 split")
-    parser.add_argument("--out_dir", type=str, default="./outputs/results", help="输出目录")
-    parser.add_argument("--batch_size", type=int, default=16, help="评估 batch size")
-    parser.add_argument("--device", type=str, default="auto", help="设备")
+    parser.add_argument("--out_dir", type=str, default=None, help="完整输出目录；优先级高于 eval.yaml")
+    parser.add_argument("--batch_size", type=int, default=None, help="评估 batch size")
+    parser.add_argument("--device", type=str, default=None, help="设备")
     args = parser.parse_args()
 
+    eval_cfg = unwrap_config_section(load_yaml(args.eval_config), "evaluation")
+    splits = eval_cfg.get("splits") or ["val_seen"]
+    split = args.split or eval_cfg.get("split") or splits[0]
+    batch_size = args.batch_size or int(eval_cfg.get("batch_size", 16))
+    num_workers = int(eval_cfg.get("num_workers", 2))
+    device_name = args.device or eval_cfg.get("device", "auto")
+    image_size = [int(v) for v in eval_cfg.get("image_size", [224, 224])]
+    max_inst_len = int(eval_cfg.get("max_inst_len", 80))
+    trajectory_cfg = eval_cfg.get("trajectory", {})
+    success_threshold = float(trajectory_cfg.get("success_threshold", eval_cfg.get("success_threshold", 20.0)))
+    stop_threshold = float(eval_cfg.get("stop_threshold", 0.5))
+    max_steps = int(trajectory_cfg.get("max_steps", eval_cfg.get("max_steps", 200)))
+
     # 设备
-    if args.device == "auto":
+    if device_name == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
-        device = torch.device(args.device)
+        device = torch.device(device_name)
 
     # 数据
     data_dir = Path(args.data_dir)
-    split_file = f"{args.split}.jsonl"
+    split_file = f"{split}.jsonl"
     ds = HADDataset(
         jsonl_path=str(data_dir / split_file),
         data_dir=str(data_dir),
-        transform=get_val_transforms((224, 224)),
-        max_inst_len=80,
+        transform=get_val_transforms(tuple(image_size)),
+        max_inst_len=max_inst_len,
     )
     loader = DataLoader(
-        ds, batch_size=args.batch_size, shuffle=False,
-        collate_fn=had_collate_fn, num_workers=2,
+        ds, batch_size=batch_size, shuffle=False,
+        collate_fn=had_collate_fn, num_workers=num_workers,
     )
-    print(f"[INFO] Split: {args.split} ({len(ds)} samples)")
+    print(f"[INFO] Split: {split} ({len(ds)} samples)")
+
+    # 输出配置
+    out_dir = resolve_eval_output_dir(args.out_dir, eval_cfg)
+    output_files = eval_cfg.get("output", {})
+    config_snapshot = build_eval_config_snapshot(
+        args=args,
+        eval_cfg=eval_cfg,
+        output_dir=out_dir,
+        split=split,
+        split_file=split_file,
+        data_dir=data_dir,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        device_name=device_name,
+        device=device,
+        image_size=image_size,
+        max_inst_len=max_inst_len,
+        success_threshold=success_threshold,
+        stop_threshold=stop_threshold,
+        max_steps=max_steps,
+        output_files=output_files,
+        num_samples=len(ds),
+    )
+    config_path = save_eval_config_snapshot(out_dir, config_snapshot, output_files)
+    print(f"[INFO] Eval config saved to: {config_path}")
 
     # 模型
     model = build_model_from_checkpoint(args.checkpoint, device)
 
     # 评估
-    out_dir = Path(args.out_dir)
-    metrics = evaluate_split(model, loader, device, out_dir, save_predictions=True)
+    metrics = evaluate_split(
+        model,
+        loader,
+        device,
+        out_dir,
+        save_predictions=True,
+        output_files=output_files,
+        success_threshold=success_threshold,
+        stop_threshold=stop_threshold,
+        max_steps=max_steps,
+    )
 
     # 打印结果
     print(f"\n{'='*50}")
-    print(f"  Evaluation Results — {args.split}")
+    print(f"  Evaluation Results — {split}")
     print(f"{'='*50}")
     for k, v in sorted(metrics.items()):
         if isinstance(v, float):
             print(f"  {k:30s}: {v:.4f}")
+        elif v is None:
+            print(f"  {k:30s}: null")
     print(f"{'='*50}")
     print(f"  Results saved to: {out_dir}")
 

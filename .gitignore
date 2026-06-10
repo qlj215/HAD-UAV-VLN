@@ -20,7 +20,9 @@ env/
 
 # Data and generated artifacts
 data/
+TravelUAVData/
 outputs/
+eval_outputs/
 runs/
 wandb/
 logs/
@@ -34,5 +36,6 @@ logs/
 *.onnx
 
 # Temporary files
+.venv-requirements.freeze.txt
 *.tmp
 *.log

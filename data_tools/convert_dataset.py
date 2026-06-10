@@ -304,46 +304,93 @@ def convert_dataset(
     print(f"\n[INFO] 总计 {len(all_samples)} 条样本")
 
     # ---- 划分并写入 JSONL ----
-    if split_ratio is not None and len(scene_trajs) > 1:
-        # 按场景划分: 不同场景 → val_unseen
-        train_ratio, val_seen_ratio, val_unseen_ratio = split_ratio
-        # TODO: 实现按场景划分逻辑（需要更多场景时启用）
-        # 目前数据量小，暂用简化策略
-        pass
+    # 目标:
+    #   1) val_seen 只能来自 train 见过的场景。
+    #   2) 每个可切分的 seen 场景都同时出现在 train 和 val_seen。
+    #   3) 场景数 >= 4 时留出完整场景给 val_unseen；场景更多时再留出 test。
+    train_ratio = split_ratio[0] if split_ratio is not None else 0.7
+    train_ratio = min(max(train_ratio, 0.0), 1.0)
 
-    # 默认策略: 前 70% 轨迹 → train, 后 30% → val_seen
     train_samples: List[dict] = []
     val_seen_samples: List[dict] = []
     val_unseen_samples: List[dict] = []
+    test_samples: List[dict] = []
 
-    # 按轨迹分配样本
-    n_trajs = len(scene_traj_counts)
-    n_train_trajs = max(1, int(n_trajs * 0.7))
-
+    scene_to_trajs: Dict[str, List[Tuple[str, int, int]]] = {}
     sample_offset = 0
-    for idx, (scene_id, traj_id, count) in enumerate(scene_traj_counts):
-        traj_samples = all_samples[sample_offset : sample_offset + count]
-        if idx < n_train_trajs:
-            train_samples.extend(traj_samples)
-        else:
-            val_seen_samples.extend(traj_samples)
+    for scene_id, traj_id, count in scene_traj_counts:
+        scene_to_trajs.setdefault(scene_id, []).append((traj_id, sample_offset, count))
         sample_offset += count
+
+    scene_ids = sorted(scene_to_trajs)
+    test_scenes: List[str] = []
+    val_unseen_scenes: List[str] = []
+
+    if len(scene_ids) >= 4:
+        # 4 个场景时只留 1 个 val_unseen；场景更多时再分出 test。
+        n_test_scenes = max(1, round(len(scene_ids) * 0.1)) if len(scene_ids) >= 6 else 0
+        n_test_scenes = min(n_test_scenes, max(0, len(scene_ids) - 2))
+
+        remaining_for_seen_and_unseen = len(scene_ids) - n_test_scenes
+        n_val_unseen_scenes = max(1, round(len(scene_ids) * 0.2))
+        n_val_unseen_scenes = min(n_val_unseen_scenes, max(0, remaining_for_seen_and_unseen - 1))
+
+        if n_test_scenes > 0:
+            test_scenes = scene_ids[-n_test_scenes:]
+            candidate_scenes = scene_ids[:-n_test_scenes]
+        else:
+            candidate_scenes = scene_ids
+
+        if n_val_unseen_scenes > 0:
+            val_unseen_scenes = candidate_scenes[-n_val_unseen_scenes:]
+            seen_scenes = candidate_scenes[:-n_val_unseen_scenes]
+        else:
+            seen_scenes = candidate_scenes
+    else:
+        seen_scenes = scene_ids
+
+    def extend_records(target: List[dict], records: List[Tuple[str, int, int]]) -> None:
+        for _, start, count in records:
+            target.extend(all_samples[start:start + count])
+
+    for scene_id in seen_scenes:
+        records = scene_to_trajs[scene_id]
+        if len(records) == 1:
+            # 只有一条轨迹时无法在不重复样本的前提下同时放入 train/val_seen。
+            extend_records(train_samples, records)
+            print(f"  [WARN] {scene_id}: 只有 1 条轨迹, 无法切分 val_seen")
+            continue
+
+        n_train = int(len(records) * train_ratio)
+        n_train = min(max(1, n_train), len(records) - 1)
+        extend_records(train_samples, records[:n_train])
+        extend_records(val_seen_samples, records[n_train:])
+
+    for scene_id in val_unseen_scenes:
+        extend_records(val_unseen_samples, scene_to_trajs[scene_id])
+
+    for scene_id in test_scenes:
+        extend_records(test_samples, scene_to_trajs[scene_id])
 
     # 写入文件
     out_path.mkdir(parents=True, exist_ok=True)
     write_jsonl(train_samples, out_path / "train.jsonl")
     write_jsonl(val_seen_samples, out_path / "val_seen.jsonl")
     write_jsonl(val_unseen_samples, out_path / "val_unseen.jsonl")
-    # test.jsonl: 暂时与 val_unseen 相同（无独立测试集时）
-    write_jsonl([], out_path / "test.jsonl")
+    write_jsonl(test_samples, out_path / "test.jsonl")
 
     # ---- 输出统计摘要 ----
+    train_scene_names = sorted({s["scene_id"] for s in train_samples})
+    val_seen_scene_names = sorted({s["scene_id"] for s in val_seen_samples})
+    val_unseen_scene_names = sorted({s["scene_id"] for s in val_unseen_samples})
+    test_scene_names = sorted({s["scene_id"] for s in test_samples})
+
     print(f"\n{'='*60}")
     print(f"转换完成!")
-    print(f"  train.jsonl:       {len(train_samples)} 条")
-    print(f"  val_seen.jsonl:    {len(val_seen_samples)} 条")
-    print(f"  val_unseen.jsonl:  {len(val_unseen_samples)} 条")
-    print(f"  test.jsonl:        0 条 (待补充)")
+    print(f"  train.jsonl:       {len(train_samples)} 条, scenes={train_scene_names}")
+    print(f"  val_seen.jsonl:    {len(val_seen_samples)} 条, scenes={val_seen_scene_names}")
+    print(f"  val_unseen.jsonl:  {len(val_unseen_samples)} 条, scenes={val_unseen_scene_names}")
+    print(f"  test.jsonl:        {len(test_samples)} 条, scenes={test_scene_names}")
     print(f"  图像目录:          {out_image_dir}")
     print(f"{'='*60}")
 
@@ -381,6 +428,7 @@ def main():
         out_dir=args.out_dir,
         dataset_name=args.dataset_name,
         copy_images=not args.no_copy_images,
+        split_ratio=(args.train_ratio, max(0.0, 1.0 - args.train_ratio), 0.2),
     )
 
 

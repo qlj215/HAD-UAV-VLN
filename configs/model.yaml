@@ -39,7 +39,7 @@ model:
   # ---- 融合模块 ----
   # self.fusion = FUSION_REGISTRY[fusion_type](vis_dim=..., text_dim=..., ...)
   fusion:
-    fusion_type: "height_cond"  # concat / height_cond / cross_attn
+    fusion_type: "concat"  # concat / height_cond / cross_attn
     hidden_dim: 512
     num_heads: 8                # 仅 cross_attn 使用
     dropout: 0.2
