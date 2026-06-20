@@ -15,6 +15,7 @@ model:
     output_dim: 512             # 投影后的特征维度
     pretrained: true
     freeze_bn: true
+    train_backbone: false       # 默认冻结 ImageNet 预训练 backbone，只训练投影/融合/策略头
     shared: false               # 前视/俯视是否共享编码器权重
 
   # ---- 文本编码器 ----
@@ -35,6 +36,19 @@ model:
     min_alt: 0.0                # 预期最低高度 (m)
     max_alt: 200.0              # 预期最高高度 (m)
     num_freqs: 8
+
+  # ---- 位置/目标方向编码器 ----
+  # enabled=true 时输入:
+  #   1) target_yaw_feat=[sin(target_local_yaw), cos(target_local_yaw)]
+  #   2) uav_position_feat=目标方向局部系 xyz / uav_position_scale
+  # target_position 只在 dataset 的旧数据 fallback 中用于计算方位角，不直接喂给模型。
+  position:
+    enabled: true
+    input_type: "target_aligned_yaw+target_aligned_uav_position"
+    hidden_dim: 64
+    uav_position_hidden_dim: 64
+    uav_position_scale: 100.0
+    dropout: 0.1
 
   # ---- 融合模块 ----
   # self.fusion = FUSION_REGISTRY[fusion_type](vis_dim=..., text_dim=..., ...)

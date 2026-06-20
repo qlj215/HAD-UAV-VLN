@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -12,6 +13,30 @@ from PIL import Image
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from datasets.had_dataset import target_relative_yaw_feature, uav_local_position_feature
+
+
+def _resolve_test_data_root() -> Path:
+    candidates = []
+    env_root = os.environ.get("HAD_TEST_DATA_DIR")
+    if env_root:
+        candidates.append(Path(env_root))
+    candidates.extend(
+        [
+            PROJECT_ROOT / "data" / "processed",
+            Path("/root/autodl-tmp/TravelUAVProcessedData"),
+            Path("/root/autodl-tmp/TravelUAVProcessedData_mini"),
+        ]
+    )
+    for candidate in candidates:
+        if (candidate / "train.jsonl").exists():
+            return candidate
+    checked = ", ".join(str(p) for p in candidates)
+    raise AssertionError(
+        "missing dataset file train.jsonl; set HAD_TEST_DATA_DIR or place data at one of: "
+        f"{checked}"
+    )
 
 
 def _token_id(word: str, vocab_size: int) -> int:
@@ -34,14 +59,14 @@ def load_image_tensor(path: Path, size: int = 64) -> torch.Tensor:
 
 @pytest.fixture(scope="session")
 def sample_record():
-    train_path = PROJECT_ROOT / "data" / "processed" / "train.jsonl"
-    assert train_path.exists(), f"missing dataset file: {train_path}"
+    data_root = _resolve_test_data_root()
+    train_path = data_root / "train.jsonl"
 
     with train_path.open("r", encoding="utf-8") as f:
         record = json.loads(f.readline())
 
-    front_path = PROJECT_ROOT / "data" / "processed" / record["front_image"]
-    down_path = PROJECT_ROOT / "data" / "processed" / record["down_image"]
+    front_path = data_root / record["front_image"]
+    down_path = data_root / record["down_image"]
     assert front_path.exists(), f"missing front image: {front_path}"
     assert down_path.exists(), f"missing down image: {down_path}"
 
@@ -67,5 +92,12 @@ def sample_inputs(sample_record):
         "padded_instruction": padded_tokens,
         "altitude": torch.tensor([record["altitude"]], dtype=torch.float32),
         "altitude_column": torch.tensor([[record["altitude"]]], dtype=torch.float32),
+        "target_yaw_feat": torch.tensor(
+            [target_relative_yaw_feature(record)], dtype=torch.float32
+        ),
+        "uav_position_feat": torch.tensor(
+            [uav_local_position_feature(record, record.get("pose"), position_scale=100.0)],
+            dtype=torch.float32,
+        ),
         "target_action": torch.tensor(record["action"], dtype=torch.float32).unsqueeze(0),
     }

@@ -36,6 +36,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
@@ -48,9 +49,9 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import yaml
 
-from datasets.had_dataset import HADDataset, had_collate_fn
+from datasets.had_dataset import HADDataset, build_vocab_from_jsonl, had_collate_fn
 from datasets.transforms import get_train_transforms, get_val_transforms
-from models.had_vln_model import HADVLNModel
+from models.had_vln_model import HADVLNModel, HADVLNModelwithPosition
 from engine.metrics import (
     aggregate_epoch_metrics,
     compute_metrics,
@@ -78,6 +79,7 @@ class Trainer:
         run_config: Optional[Dict[str, Any]] = None,
     ):
         self.model = model.to(device)
+        self.uses_position = isinstance(model, HADVLNModelwithPosition)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.config = config
@@ -114,6 +116,27 @@ class Trainer:
         self.action_weight = loss_cfg.get("action_weight", 1.0)
         self.stop_weight = loss_cfg.get("stop_weight", 0.5)
         self.progress_weight = loss_cfg.get("progress_weight", 0.1)
+        self.yaw_loss_cfg = loss_cfg.get("yaw") or loss_cfg.get("yaw_loss") or {}
+        self.yaw_loss_mode = str(self.yaw_loss_cfg.get("mode", "baseline")).lower()
+        self.yaw_loss_type = str(self.yaw_loss_cfg.get("type", "smooth_l1")).lower()
+        self.yaw_smooth_l1_beta = float(self.yaw_loss_cfg.get("smooth_l1_beta", 1.0))
+        self.yaw_wrap_error = bool(self.yaw_loss_cfg.get("wrap_error", True))
+        self.dz_loss_cfg = loss_cfg.get("dz") or loss_cfg.get("dz_loss") or {}
+        self.dz_loss_enabled = bool(self.dz_loss_cfg.get("enabled", False))
+        self.dz_loss_type = str(self.dz_loss_cfg.get("type", "smooth_l1")).lower()
+        self.dz_smooth_l1_beta = float(self.dz_loss_cfg.get("smooth_l1_beta", 0.5))
+        self.dz_loss_weight = float(self.dz_loss_cfg.get("weight", 1.0))
+        self.dz_normalize_dim_weights = bool(self.dz_loss_cfg.get("normalize_dim_weights", True))
+        self.dz_mag_alpha = float(self.dz_loss_cfg.get("mag_alpha", 0.0))
+        self.dz_mag_scale = max(float(self.dz_loss_cfg.get("mag_scale", 1.0)), 1e-6)
+        self.dz_max_sample_weight = self.dz_loss_cfg.get("max_sample_weight")
+        self.dz_normalize_by_weight_sum = bool(self.dz_loss_cfg.get("normalize_by_weight_sum", True))
+
+        self.dz_sign_cfg = loss_cfg.get("dz_sign") or loss_cfg.get("dz_sign_aux") or {}
+        self.dz_sign_enabled = bool(self.dz_sign_cfg.get("enabled", False))
+        self.dz_sign_threshold = float(self.dz_sign_cfg.get("threshold", 0.25))
+        self.dz_sign_weight = float(self.dz_sign_cfg.get("weight", 0.2))
+        self.dz_sign_class_weights = self.dz_sign_cfg.get("class_weights")
 
         self.use_progress = model.policy.progress_head is not None
 
@@ -187,6 +210,10 @@ class Trainer:
             "action_weight": self.action_weight,
             "stop_weight": self.stop_weight,
             "progress_weight": self.progress_weight,
+            "yaw_loss": self.yaw_loss_cfg,
+            "dz_loss": self.dz_loss_cfg,
+            "dz_sign_loss": self.dz_sign_cfg,
+            "yaw_strategy": getattr(self.model.policy, "yaw_strategy", "baseline"),
             "use_progress": self.use_progress,
             "use_amp": self.use_amp,
             "grad_clip_enabled": self.grad_clip_enabled,
@@ -208,13 +235,16 @@ class Trainer:
         lr = float(opt_cfg.get("learning_rate", 1e-4))
         wd = float(opt_cfg.get("weight_decay", 1e-4))
         betas = tuple(opt_cfg.get("betas", [0.9, 0.999]))
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        if not params:
+            raise ValueError("模型没有可训练参数，请检查冻结配置。")
 
         if opt_type == "adamw":
-            return optim.AdamW(self.model.parameters(), lr=lr, weight_decay=wd, betas=betas)
+            return optim.AdamW(params, lr=lr, weight_decay=wd, betas=betas)
         elif opt_type == "adam":
-            return optim.Adam(self.model.parameters(), lr=lr, weight_decay=wd, betas=betas)
+            return optim.Adam(params, lr=lr, weight_decay=wd, betas=betas)
         elif opt_type == "sgd":
-            return optim.SGD(self.model.parameters(), lr=lr, weight_decay=wd, momentum=0.9)
+            return optim.SGD(params, lr=lr, weight_decay=wd, momentum=0.9)
         raise ValueError(f"未知优化器: {opt_type}")
 
     def _build_scheduler(self, train_cfg: dict, steps_per_epoch: int):
@@ -241,6 +271,215 @@ class Trainer:
 
     # ---- 损失计算 ----
 
+    def _get_step_ids(self, batch: dict) -> torch.Tensor:
+        step_ids = batch.get("step_id")
+        if step_ids is not None:
+            return step_ids.to(self.device)
+        return torch.tensor(
+            [m.get("step_id", 0) for m in batch["meta"]],
+            dtype=torch.long,
+            device=self.device,
+        )
+
+    def _yaw_error(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        err = pred - target
+        if self.yaw_wrap_error:
+            err = torch.atan2(torch.sin(err), torch.cos(err))
+        return err
+
+    def _yaw_element_loss(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        err = self._yaw_error(pred, target)
+        if self.yaw_loss_type == "mse":
+            return err ** 2
+        return F.smooth_l1_loss(
+            err,
+            torch.zeros_like(err),
+            reduction="none",
+            beta=self.yaw_smooth_l1_beta,
+        )
+
+    def _dz_element_loss(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.dz_loss_type == "mse":
+            return (pred - target) ** 2
+        return F.smooth_l1_loss(
+            pred,
+            target,
+            reduction="none",
+            beta=self.dz_smooth_l1_beta,
+        )
+
+    def _compute_dz_loss(
+        self,
+        dz_pred: torch.Tensor,
+        dz_gt: torch.Tensor,
+        not_done_mask_1d: torch.Tensor,
+    ) -> torch.Tensor:
+        element_loss = self._dz_element_loss(dz_pred, dz_gt)
+        weights = not_done_mask_1d.to(dtype=element_loss.dtype, device=element_loss.device)
+
+        if self.dz_mag_alpha != 0.0:
+            mag_ratio = torch.clamp(dz_gt.abs() / self.dz_mag_scale, min=0.0)
+            sample_weights = 1.0 + self.dz_mag_alpha * mag_ratio
+            if self.dz_max_sample_weight is not None:
+                sample_weights = torch.clamp(
+                    sample_weights,
+                    max=float(self.dz_max_sample_weight),
+                )
+            weights = weights * sample_weights.to(dtype=element_loss.dtype)
+
+        denom = weights.sum() if self.dz_normalize_by_weight_sum else not_done_mask_1d.sum()
+        if denom.item() > 0:
+            return (element_loss * weights).sum() / denom
+        return element_loss.new_tensor(0.0)
+
+    def _compute_xyz_loss(
+        self,
+        pred_action: torch.Tensor,
+        gt_action: torch.Tensor,
+        not_done_mask: torch.Tensor,
+        action_count: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        if not self.dz_loss_enabled:
+            xyz_diff = (pred_action[:, :3] - gt_action[:, :3]) * not_done_mask
+            loss = (xyz_diff ** 2).sum() / (action_count * 3)
+            return loss, {"xyz": loss}
+
+        not_done_1d = not_done_mask.squeeze(-1)
+        xy_diff = (pred_action[:, :2] - gt_action[:, :2]) * not_done_mask
+        xy_loss = (xy_diff ** 2).sum() / (action_count * 2)
+        dz_loss = self._compute_dz_loss(
+            pred_action[:, 2],
+            gt_action[:, 2],
+            not_done_1d,
+        )
+
+        if self.dz_normalize_dim_weights:
+            xyz_loss = (2.0 * xy_loss + self.dz_loss_weight * dz_loss) / (2.0 + self.dz_loss_weight)
+        else:
+            xyz_loss = xy_loss + self.dz_loss_weight * dz_loss
+
+        return xyz_loss, {
+            "xy": xy_loss,
+            "dz": dz_loss,
+            "xyz": xyz_loss,
+        }
+
+    def _dz_sign_targets(self, dz_gt: torch.Tensor) -> torch.Tensor:
+        targets = torch.ones_like(dz_gt, dtype=torch.long)
+        targets = torch.where(
+            dz_gt < -self.dz_sign_threshold,
+            torch.zeros_like(targets),
+            targets,
+        )
+        targets = torch.where(
+            dz_gt > self.dz_sign_threshold,
+            torch.full_like(targets, 2),
+            targets,
+        )
+        return targets
+
+    def _compute_dz_sign_loss(
+        self,
+        outputs: dict,
+        gt_action: torch.Tensor,
+        not_done_mask_1d: torch.Tensor,
+    ) -> torch.Tensor:
+        logits = outputs.get("dz_sign_logits")
+        if logits is None:
+            return gt_action.new_tensor(0.0)
+
+        mask = not_done_mask_1d > 0
+        if mask.sum().item() == 0:
+            return gt_action.new_tensor(0.0)
+
+        targets = self._dz_sign_targets(gt_action[:, 2])
+        class_weight = None
+        if self.dz_sign_class_weights is not None:
+            class_weight = torch.tensor(
+                self.dz_sign_class_weights,
+                dtype=logits.dtype,
+                device=logits.device,
+            )
+        return F.cross_entropy(logits[mask], targets[mask], weight=class_weight)
+
+    def _masked_mean(self, values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        mask = mask.to(dtype=values.dtype, device=values.device)
+        denom = mask.sum()
+        if denom.item() > 0:
+            return (values * mask).sum() / denom
+        return values.new_tensor(0.0)
+
+    def _compute_yaw_reweight_loss(
+        self,
+        yaw_pred: torch.Tensor,
+        yaw_gt: torch.Tensor,
+        step_ids: torch.Tensor,
+        not_done_mask_1d: torch.Tensor,
+    ) -> torch.Tensor:
+        element_loss = self._yaw_element_loss(yaw_pred, yaw_gt)
+        is_init = (step_ids == 0).to(dtype=element_loss.dtype)
+        init_extra_weight = float(self.yaw_loss_cfg.get("init_extra_weight", 5.0))
+        weights = 1.0 + init_extra_weight * is_init
+
+        mag_alpha = float(self.yaw_loss_cfg.get("mag_alpha", 0.0))
+        if mag_alpha != 0.0:
+            yaw_max = max(float(self.yaw_loss_cfg.get("yaw_max", 3.141592653589793)), 1e-6)
+            yaw_mag = torch.atan2(torch.sin(yaw_gt), torch.cos(yaw_gt)).abs()
+            mag_ratio = torch.clamp(yaw_mag / yaw_max, min=0.0, max=1.0)
+            weights = weights * (1.0 + mag_alpha * mag_ratio)
+
+        weights = weights * not_done_mask_1d.to(dtype=element_loss.dtype)
+        if bool(self.yaw_loss_cfg.get("normalize_by_weight_sum", False)):
+            denom = weights.sum()
+        else:
+            denom = not_done_mask_1d.to(dtype=element_loss.dtype).sum()
+        if denom.item() > 0:
+            return (element_loss * weights).sum() / denom
+        return element_loss.new_tensor(0.0)
+
+    def _compute_expert_yaw_loss(
+        self,
+        outputs: dict,
+        yaw_gt: torch.Tensor,
+        step_ids: torch.Tensor,
+        not_done_mask_1d: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        if "yaw_init" not in outputs or "yaw_normal" not in outputs:
+            yaw_pred = outputs["pred_action"][:, 3]
+            loss = self._compute_yaw_reweight_loss(
+                yaw_pred, yaw_gt, step_ids, not_done_mask_1d
+            )
+            return loss, {"yaw": loss}
+
+        yaw_init = outputs["yaw_init"].squeeze(-1)
+        yaw_normal = outputs["yaw_normal"].squeeze(-1)
+        init_mask = ((step_ids == 0) & (not_done_mask_1d > 0)).to(dtype=yaw_gt.dtype)
+        normal_mask = ((step_ids != 0) & (not_done_mask_1d > 0)).to(dtype=yaw_gt.dtype)
+
+        loss_init = self._masked_mean(
+            self._yaw_element_loss(yaw_init, yaw_gt), init_mask
+        )
+        loss_normal = self._masked_mean(
+            self._yaw_element_loss(yaw_normal, yaw_gt), normal_mask
+        )
+
+        init_weight = float(self.yaw_loss_cfg.get("init_weight", 3.0))
+        normal_weight = float(self.yaw_loss_cfg.get("normal_weight", 1.0))
+        loss = init_weight * loss_init + normal_weight * loss_normal
+        return loss, {
+            "yaw": loss,
+            "yaw_init": loss_init,
+            "yaw_normal": loss_normal,
+        }
+
     def compute_losses(self, outputs: dict, batch: dict) -> Tuple[torch.Tensor, dict]:
         """返回 (total_loss, loss_dict)。"""
         pred_action = outputs["pred_action"]       # (B, 4)
@@ -252,13 +491,80 @@ class Trainer:
         # 动作损失 (仅非终点步)
         not_done_mask = (gt_done < 0.5).float().unsqueeze(-1)  # (B, 1)
         action_count = not_done_mask.sum()
-        if action_count > 0:
-            action_diff = (pred_action - gt_action) * not_done_mask
-            losses["action"] = (action_diff ** 2).sum() / action_count
+        yaw_strategy = getattr(self.model.policy, "yaw_strategy", "baseline")
+        split_yaw_loss = (
+            self.yaw_loss_mode not in {"", "none", "baseline"}
+            or yaw_strategy != "baseline"
+        )
+        if action_count > 0 and split_yaw_loss:
+            xyz_loss, xyz_parts = self._compute_xyz_loss(
+                pred_action,
+                gt_action,
+                not_done_mask,
+                action_count,
+            )
+            losses.update(xyz_parts)
+            losses["xyz"] = xyz_loss
+
+            step_ids = self._get_step_ids(batch)
+            not_done_1d = not_done_mask.squeeze(-1)
+            yaw_gt = gt_action[:, 3]
+            if self.yaw_loss_mode == "reweight":
+                losses["yaw"] = self._compute_yaw_reweight_loss(
+                    pred_action[:, 3], yaw_gt, step_ids, not_done_1d
+                )
+            elif self.yaw_loss_mode in {
+                "first_step_head",
+                "gated_expert",
+                "rule_gated_expert",
+            }:
+                yaw_loss, yaw_parts = self._compute_expert_yaw_loss(
+                    outputs, yaw_gt, step_ids, not_done_1d
+                )
+                losses.update(yaw_parts)
+                losses["yaw"] = yaw_loss
+            else:
+                losses["yaw"] = self._masked_mean(
+                    self._yaw_element_loss(pred_action[:, 3], yaw_gt),
+                    not_done_1d,
+                )
+            losses["action"] = losses["xyz"] + losses["yaw"]
+        elif action_count > 0:
+            action_diff = pred_action - gt_action
+            if action_diff.size(-1) >= 4:
+                action_diff = action_diff.clone()
+                action_diff[:, 3] = self._yaw_error(pred_action[:, 3], gt_action[:, 3])
+            action_diff = action_diff * not_done_mask
+            if self.dz_loss_enabled and action_diff.size(-1) >= 4:
+                non_dz_diff = action_diff[:, [0, 1, 3]]
+                non_dz_loss = (non_dz_diff ** 2).sum() / (action_count * 3)
+                dz_loss = self._compute_dz_loss(
+                    pred_action[:, 2],
+                    gt_action[:, 2],
+                    not_done_mask.squeeze(-1),
+                )
+                if self.dz_normalize_dim_weights:
+                    losses["action"] = (3.0 * non_dz_loss + self.dz_loss_weight * dz_loss) / (3.0 + self.dz_loss_weight)
+                else:
+                    losses["action"] = non_dz_loss + self.dz_loss_weight * dz_loss
+                losses["non_dz_action"] = non_dz_loss
+                losses["dz"] = dz_loss
+            else:
+                action_dims = pred_action.size(-1)
+                losses["action"] = (action_diff ** 2).sum() / (action_count * action_dims)
         else:
             losses["action"] = torch.tensor(0.0, device=self.device)
 
         total = self.action_weight * losses["action"]
+
+        if self.dz_sign_enabled:
+            dz_sign_loss = self._compute_dz_sign_loss(
+                outputs,
+                gt_action,
+                not_done_mask.squeeze(-1),
+            )
+            losses["dz_sign"] = dz_sign_loss
+            total = total + self.dz_sign_weight * dz_sign_loss
 
         # Stop 损失
         stop_logit = outputs.get("stop_logit")
@@ -268,10 +574,7 @@ class Trainer:
 
         # Progress 损失 (可选)
         if self.use_progress and "progress" in outputs:
-            step_ids = torch.tensor(
-                [m.get("step_id", 0) for m in batch["meta"]],
-                dtype=torch.float, device=self.device,
-            )
+            step_ids = self._get_step_ids(batch).to(dtype=torch.float)
             traj_lens = torch.tensor(
                 [max(self._traj_max_steps.get(m.get("trajectory_id", ""), 1), 1)
                  for m in batch["meta"]],
@@ -298,14 +601,41 @@ class Trainer:
             down = batch["down_image"].to(self.device)
             inst = batch["instruction"].to(self.device)
             alt = batch["altitude"].to(self.device)
+            target_yaw = batch["target_yaw_feat"].to(self.device) if self.uses_position else None
+            uav_position = batch["uav_position_feat"].to(self.device) if self.uses_position else None
+            step_ids = self._get_step_ids(batch)
 
             # 前向
             if self.use_amp:
                 with autocast():
-                    outputs = self.model(front, down, inst, alt, return_features=False)
+                    if self.uses_position:
+                        outputs = self.model(
+                            front, down, inst, alt,
+                            target_yaw, uav_position,
+                            return_features=False,
+                            step_ids=step_ids,
+                        )
+                    else:
+                        outputs = self.model(
+                            front, down, inst, alt,
+                            return_features=False,
+                            step_ids=step_ids,
+                        )
                     total_loss, loss_dict = self.compute_losses(outputs, batch)
             else:
-                outputs = self.model(front, down, inst, alt, return_features=False)
+                if self.uses_position:
+                    outputs = self.model(
+                        front, down, inst, alt,
+                        target_yaw, uav_position,
+                        return_features=False,
+                        step_ids=step_ids,
+                    )
+                else:
+                    outputs = self.model(
+                        front, down, inst, alt,
+                        return_features=False,
+                        step_ids=step_ids,
+                    )
                 total_loss, loss_dict = self.compute_losses(outputs, batch)
 
             # 反向
@@ -371,8 +701,23 @@ class Trainer:
             down = batch["down_image"].to(self.device)
             inst = batch["instruction"].to(self.device)
             alt = batch["altitude"].to(self.device)
+            target_yaw = batch["target_yaw_feat"].to(self.device) if self.uses_position else None
+            uav_position = batch["uav_position_feat"].to(self.device) if self.uses_position else None
+            step_ids = self._get_step_ids(batch)
 
-            outputs = self.model(front, down, inst, alt, return_features=False)
+            if self.uses_position:
+                outputs = self.model(
+                    front, down, inst, alt,
+                    target_yaw, uav_position,
+                    return_features=False,
+                    step_ids=step_ids,
+                )
+            else:
+                outputs = self.model(
+                    front, down, inst, alt,
+                    return_features=False,
+                    step_ids=step_ids,
+                )
             _, loss_dict = self.compute_losses(outputs, batch)
             val_loss_total += loss_dict.get("total", 0.0).item()
             n_batches += 1
@@ -401,7 +746,7 @@ class Trainer:
             samples=getattr(dataloader.dataset, "samples", []),
             simulator=None,
             success_threshold=20.0,
-            stop_threshold=0.5,
+            stop_threshold=0.3,
             max_steps=200,
         )
 
@@ -662,9 +1007,16 @@ def build_model_from_config(model_cfg: dict) -> HADVLNModel:
 
     # ---- 视觉编码器 ----
     vis = m.get("vision", {})
+    vis_pretrained = vis.get("pretrained", True)
+    vis_freeze_bn = vis.get("freeze_bn", True)
     vis_backbone = vis.get("backbone", "resnet18")
     vis_output_dim = vis.get("output_dim", 512)
     vis_shared = vis.get("shared", False)
+    vis_train_backbone = vis.get("train_backbone", True)
+
+    # ---- 实验消融开关 ----
+    ablation = m.get("ablation", {})
+    vision_mode = ablation.get("vision_mode", vis.get("mode", "dual"))
 
     # ---- 文本编码器 ----
     lang = m.get("language", {})
@@ -681,6 +1033,11 @@ def build_model_from_config(model_cfg: dict) -> HADVLNModel:
     height_hidden_dim = height.get("hidden_dim", 64)
     height_min_alt = height.get("min_alt", 0.0)
     height_max_alt = height.get("max_alt", 200.0)
+    position = m.get("position", {})
+    position_enabled = bool(position.get("enabled", False))
+    position_hidden_dim = int(position.get("hidden_dim", 64))
+    uav_position_hidden_dim = int(position.get("uav_position_hidden_dim", position_hidden_dim))
+    position_dropout = float(position.get("dropout", 0.1))
 
     # ---- 融合模块 ----
     fusion = m.get("fusion", {})
@@ -693,15 +1050,25 @@ def build_model_from_config(model_cfg: dict) -> HADVLNModel:
     policy = m.get("policy_head", {})
     policy_hidden_dims = tuple(policy.get("hidden_dims", [512, 256]))
     policy_dropout = policy.get("dropout", 0.3)
+    policy_yaw_strategy = policy.get("yaw_strategy", "baseline")
 
     # ---- 辅助任务 ----
     aux = m.get("auxiliary_tasks", {})
     use_progress_monitor = aux.get("progress_monitor", False)
+    use_dz_sign_aux = aux.get("dz_sign_aux", aux.get("dz_sign_head", False))
+    dz_sign_hidden_dim = int(aux.get("dz_sign_hidden_dim", 128))
+    use_height = ablation.get("use_height", height.get("enabled", True))
+    use_language = ablation.get("use_language", lang.get("enabled", True))
+    fixed_gate_alpha = fusion.get("fixed_gate_alpha", ablation.get("fixed_gate_alpha"))
 
-    return HADVLNModel(
+    model_kwargs = dict(
+        vis_pretrained=vis_pretrained,
+        vis_freeze_bn=vis_freeze_bn,
         vis_backbone=vis_backbone,
         vis_output_dim=vis_output_dim,
         vis_shared=vis_shared,
+        vis_train_backbone=vis_train_backbone,
+        vision_mode=vision_mode,
         lang_vocab_size=lang_vocab_size,
         lang_embedding_dim=lang_embedding_dim,
         lang_hidden_dim=lang_hidden_dim,
@@ -715,9 +1082,23 @@ def build_model_from_config(model_cfg: dict) -> HADVLNModel:
         fusion_hidden_dim=fusion_hidden_dim,
         fusion_num_heads=fusion_num_heads,
         policy_hidden_dims=policy_hidden_dims,
+        policy_yaw_strategy=policy_yaw_strategy,
         use_progress_monitor=use_progress_monitor,
+        use_dz_sign_aux=use_dz_sign_aux,
+        dz_sign_hidden_dim=dz_sign_hidden_dim,
+        use_height=use_height,
+        use_language=use_language,
+        fixed_gate_alpha=fixed_gate_alpha,
         dropout=fusion_dropout,
     )
+    if position_enabled:
+        return HADVLNModelwithPosition(
+            position_hidden_dim=position_hidden_dim,
+            uav_position_hidden_dim=uav_position_hidden_dim,
+            position_dropout=position_dropout,
+            **model_kwargs,
+        )
+    return HADVLNModel(**model_kwargs)
 
 
 # ================================================================
@@ -756,18 +1137,39 @@ def main():
     data_dir = processed.get("save_dir", "./data/processed")
     data_dir = str(Path(data_dir).resolve())
 
+    inst_cfg = data_cfg.setdefault("instruction", {})
+    max_inst_len = int(inst_cfg.get("max_length", 80))
+    vocab_size = int(inst_cfg.get("vocab_size", 5000))
+    vocab_path_cfg = inst_cfg.get("vocab_path")
+    vocab_path = Path(vocab_path_cfg) if vocab_path_cfg else Path(data_dir) / "vocab.json"
+    if not vocab_path.is_absolute():
+        vocab_path = Path(data_dir) / vocab_path
+    if not vocab_path.exists():
+        train_jsonl = Path(data_dir) / "train.jsonl"
+        print(f"[INFO] Building deterministic instruction vocab: {vocab_path}")
+        build_vocab_from_jsonl(str(train_jsonl), str(vocab_path), vocab_size=vocab_size)
+    inst_cfg["vocab_path"] = str(vocab_path)
+    position_cfg = model_cfg.get("position", {})
+    uav_position_scale = float(position_cfg.get("uav_position_scale", 100.0))
+
     # ---- 数据集 ----
     train_ds = HADDataset(
         jsonl_path=os.path.join(data_dir, "train.jsonl"),
         data_dir=data_dir,
         transform=get_train_transforms(img_size),
-        max_inst_len=data_cfg.get("instruction", {}).get("max_length", 80),
+        max_inst_len=max_inst_len,
+        vocab_path=str(vocab_path),
+        vocab_size=vocab_size,
+        uav_position_scale=uav_position_scale,
     )
     val_ds = HADDataset(
         jsonl_path=os.path.join(data_dir, "val_seen.jsonl"),
         data_dir=data_dir,
         transform=get_val_transforms(img_size),
-        max_inst_len=data_cfg.get("instruction", {}).get("max_length", 80),
+        max_inst_len=max_inst_len,
+        vocab_path=str(vocab_path),
+        vocab_size=vocab_size,
+        uav_position_scale=uav_position_scale,
     )
 
     batch_size = train_cfg.get("batch_size", 16)

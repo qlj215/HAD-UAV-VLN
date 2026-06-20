@@ -13,7 +13,7 @@
 #   pip install streamlit plotly pandas
 #
 # Run:
-#   streamlit run train_log_viewer.py --server.address 0.0.0.0 --server.port 8501 -- /path/to/run_dir_or_outputs_root
+#   streamlit run vis_train/train_log_viewer.py --server.address 0.0.0.0 --server.port 8501 -- /path/to/run_dir_or_outputs_root
 # ------------------------------------------------------------
 
 import json
@@ -345,6 +345,7 @@ def main():
     st.set_page_config(page_title="Train Run Viewer", page_icon="🚀", layout="wide")
     st.title("🚀 Train Run Viewer")
     st.caption("输入训练 run 大目录，统一查看配置、训练曲线、验证指标、checkpoint 和结果文件。")
+    st.caption("坐标说明：新 target-aligned 数据中 dx/dy/dz/dyaw 均位于目标方向局部系，+x 指向轨迹终点方向。")
 
     default_root = sys.argv[1] if len(sys.argv) > 1 else "."
     root_str = st.sidebar.text_input("训练 run 目录 / outputs 大目录", value=default_root)

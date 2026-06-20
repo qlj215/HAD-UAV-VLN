@@ -94,6 +94,7 @@ class HeightConditionedFusion(nn.Module):
         height_dim: int = 64,
         hidden_dim: int = 512,
         dropout: float = 0.2,
+        fixed_gate_alpha: Optional[float] = None,
     ):
         super().__init__()
 
@@ -120,6 +121,14 @@ class HeightConditionedFusion(nn.Module):
             nn.Linear(height_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(inplace=True),
+        )
+
+        if fixed_gate_alpha is not None and not 0.0 <= float(fixed_gate_alpha) <= 1.0:
+            raise ValueError(
+                f"fixed_gate_alpha must be in [0, 1], got {fixed_gate_alpha}"
+            )
+        self.fixed_gate_alpha = (
+            None if fixed_gate_alpha is None else float(fixed_gate_alpha)
         )
 
         # 用四类信息共同预测视角权重
@@ -162,7 +171,12 @@ class HeightConditionedFusion(nn.Module):
             dim=-1,
         )
 
-        gate = self.gate_net(gate_input)      # (B, 2)
+        if self.fixed_gate_alpha is not None:
+            gate = F_front.new_tensor(
+                [self.fixed_gate_alpha, 1.0 - self.fixed_gate_alpha]
+            ).unsqueeze(0).expand(F_front.size(0), -1)
+        else:
+            gate = self.gate_net(gate_input)      # (B, 2)
 
         # 只对两个视觉视角做门控
         weighted_vis = gate[:, 0:1] * h_front + gate[:, 1:2] * h_down

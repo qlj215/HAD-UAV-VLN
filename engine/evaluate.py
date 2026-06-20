@@ -38,7 +38,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from datasets.had_dataset import HADDataset, had_collate_fn
 from datasets.transforms import get_val_transforms
-from models.had_vln_model import HADVLNModel
+from models.had_vln_model import HADVLNModel, HADVLNModelwithPosition
 from engine.metrics import aggregate_epoch_metrics, compute_metrics, compute_trajectory_metrics
 
 
@@ -50,7 +50,7 @@ def evaluate_split(
     save_predictions: bool = True,
     output_files: Optional[Dict[str, str]] = None,
     success_threshold: float = 20.0,
-    stop_threshold: float = 0.5,
+    stop_threshold: float = 0.3,
     max_steps: int = 200,
 ) -> Dict[str, Any]:
     """在单个 split 上运行评估。
@@ -67,6 +67,7 @@ def evaluate_split(
     """
     model.eval()
     model.to(device)
+    uses_position = isinstance(model, HADVLNModelwithPosition)
 
     all_batch_metrics = []
     all_predictions: List[dict] = []
@@ -77,9 +78,25 @@ def evaluate_split(
         down = batch["down_image"].to(device)
         inst = batch["instruction"].to(device)
         alt = batch["altitude"].to(device)
+        target_yaw = batch["target_yaw_feat"].to(device) if uses_position else None
+        uav_position = batch["uav_position_feat"].to(device) if uses_position else None
+        step_ids = batch.get("step_id")
+        step_ids = step_ids.to(device) if step_ids is not None else None
 
         with torch.no_grad():
-            outputs = model(front, down, inst, alt, return_features=False)
+            if uses_position:
+                outputs = model(
+                    front, down, inst, alt,
+                    target_yaw, uav_position,
+                    return_features=False,
+                    step_ids=step_ids,
+                )
+            else:
+                outputs = model(
+                    front, down, inst, alt,
+                    return_features=False,
+                    step_ids=step_ids,
+                )
 
         # 指标
         m = compute_metrics(
@@ -201,6 +218,8 @@ def build_eval_config_snapshot(
     max_steps: int,
     output_files: Dict[str, str],
     num_samples: int,
+    vocab_path: str,
+    vocab_size: int,
 ) -> Dict[str, Any]:
     """Build a JSON-serializable snapshot of this evaluation run."""
     return {
@@ -224,6 +243,8 @@ def build_eval_config_snapshot(
             "num_samples": num_samples,
             "image_size": image_size,
             "max_inst_len": max_inst_len,
+            "vocab_path": vocab_path,
+            "vocab_size": vocab_size,
         },
         "model": {
             "checkpoint": args.checkpoint,
@@ -268,11 +289,20 @@ def build_model_from_checkpoint(ckpt_path: str, device: torch.device) -> HADVLNM
     fusion = m.get("fusion", {})
     policy = m.get("policy_head", {})
     aux = m.get("auxiliary_tasks", {})
+    ablation = m.get("ablation", {})
+    position = m.get("position", {})
+    position_enabled = bool(position.get("enabled", False))
+    use_dz_sign_aux = aux.get("dz_sign_aux", aux.get("dz_sign_head", False))
+    dz_sign_hidden_dim = int(aux.get("dz_sign_hidden_dim", 128))
 
-    model = HADVLNModel(
+    model_kwargs = dict(
+        vis_pretrained=vis.get("pretrained", True),
+        vis_freeze_bn=vis.get("freeze_bn", True),
         vis_backbone=vis.get("backbone", "resnet18"),
         vis_output_dim=vis.get("output_dim", 512),
         vis_shared=vis.get("shared", False),
+        vis_train_backbone=vis.get("train_backbone", True),
+        vision_mode=ablation.get("vision_mode", vis.get("mode", "dual")),
         lang_vocab_size=lang.get("vocab_size", 5000),
         lang_embedding_dim=lang.get("embedding_dim", 300),
         lang_hidden_dim=lang.get("hidden_dim", 512),
@@ -286,12 +316,49 @@ def build_model_from_checkpoint(ckpt_path: str, device: torch.device) -> HADVLNM
         fusion_hidden_dim=fusion.get("hidden_dim", 512),
         fusion_num_heads=fusion.get("num_heads", 8),
         policy_hidden_dims=tuple(policy.get("hidden_dims", [512, 256])),
+        policy_yaw_strategy=policy.get("yaw_strategy", "baseline"),
         use_progress_monitor=aux.get("progress_monitor", False),
+        use_dz_sign_aux=use_dz_sign_aux,
+        dz_sign_hidden_dim=dz_sign_hidden_dim,
+        use_height=ablation.get("use_height", height.get("enabled", True)),
+        use_language=ablation.get("use_language", lang.get("enabled", True)),
+        fixed_gate_alpha=fusion.get("fixed_gate_alpha", ablation.get("fixed_gate_alpha")),
         dropout=fusion.get("dropout", 0.2),
     )
+    if position_enabled:
+        model = HADVLNModelwithPosition(
+            position_hidden_dim=int(position.get("hidden_dim", 64)),
+            uav_position_hidden_dim=int(position.get("uav_position_hidden_dim", position.get("hidden_dim", 64))),
+            position_dropout=float(position.get("dropout", 0.1)),
+            **model_kwargs,
+        )
+    else:
+        model = HADVLNModel(**model_kwargs)
     model.load_state_dict(ckpt["model_state_dict"])
     print(f"[INFO] Loaded checkpoint from epoch {ckpt.get('epoch', '?')}")
     return model
+
+
+def resolve_vocab_from_checkpoint(ckpt_path: str, data_dir: Path) -> Dict[str, Any]:
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    saved_config = ckpt.get("config", {})
+    data_cfg = saved_config.get("data", {})
+    model_cfg = saved_config.get("model", {})
+    m = model_cfg.get("model", model_cfg)
+    inst_cfg = data_cfg.get("instruction", {})
+    lang_cfg = m.get("language", {})
+    position_cfg = m.get("position", {})
+
+    vocab_size = int(inst_cfg.get("vocab_size", lang_cfg.get("vocab_size", 5000)))
+    vocab_path_cfg = inst_cfg.get("vocab_path")
+    vocab_path = Path(vocab_path_cfg) if vocab_path_cfg else data_dir / "vocab.json"
+    if not vocab_path.is_absolute():
+        vocab_path = data_dir / vocab_path
+    return {
+        "vocab_path": str(vocab_path),
+        "vocab_size": vocab_size,
+        "uav_position_scale": float(position_cfg.get("uav_position_scale", 100.0)),
+    }
 
 
 def main():
@@ -317,7 +384,7 @@ def main():
     max_inst_len = int(eval_cfg.get("max_inst_len", 80))
     trajectory_cfg = eval_cfg.get("trajectory", {})
     success_threshold = float(trajectory_cfg.get("success_threshold", eval_cfg.get("success_threshold", 20.0)))
-    stop_threshold = float(eval_cfg.get("stop_threshold", 0.5))
+    stop_threshold = float(eval_cfg.get("stop_threshold", 0.3))
     max_steps = int(trajectory_cfg.get("max_steps", eval_cfg.get("max_steps", 200)))
 
     # 设备
@@ -329,11 +396,15 @@ def main():
     # 数据
     data_dir = Path(args.data_dir)
     split_file = f"{split}.jsonl"
+    vocab_info = resolve_vocab_from_checkpoint(args.checkpoint, data_dir)
     ds = HADDataset(
         jsonl_path=str(data_dir / split_file),
         data_dir=str(data_dir),
         transform=get_val_transforms(tuple(image_size)),
         max_inst_len=max_inst_len,
+        vocab_path=vocab_info["vocab_path"],
+        vocab_size=vocab_info["vocab_size"],
+        uav_position_scale=vocab_info["uav_position_scale"],
     )
     loader = DataLoader(
         ds, batch_size=batch_size, shuffle=False,
@@ -362,6 +433,8 @@ def main():
         max_steps=max_steps,
         output_files=output_files,
         num_samples=len(ds),
+        vocab_path=vocab_info["vocab_path"],
+        vocab_size=vocab_info["vocab_size"],
     )
     config_path = save_eval_config_snapshot(out_dir, config_snapshot, output_files)
     print(f"[INFO] Eval config saved to: {config_path}")

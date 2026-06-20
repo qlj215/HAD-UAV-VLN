@@ -8,6 +8,7 @@ Run from the project root:
 """
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -22,9 +23,28 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import models.had_vln_model as had_module
+from datasets.had_dataset import target_relative_yaw_feature, uav_local_position_feature
 from models.encoders import DownEncoder, FrontEncoder, HeightEncoder, TextEncoder
 from models.fusion import ConcatFusion, CrossAttentionFusion, HeightConditionedFusion
 from models.policy_head import MultiHeadPolicy, PolicyHead, ProgressMonitor
+
+
+def resolve_data_root() -> Path:
+    candidates = []
+    env_root = os.environ.get("HAD_TEST_DATA_DIR")
+    if env_root:
+        candidates.append(Path(env_root))
+    candidates.extend(
+        [
+            PROJECT_ROOT / "data" / "processed",
+            Path("/root/autodl-tmp/TravelUAVProcessedData"),
+            Path("/root/autodl-tmp/TravelUAVProcessedData_mini"),
+        ]
+    )
+    for candidate in candidates:
+        if (candidate / "train.jsonl").exists():
+            return candidate
+    raise FileNotFoundError("missing train.jsonl; set HAD_TEST_DATA_DIR")
 
 
 def token_id(word: str, vocab_size: int) -> int:
@@ -90,17 +110,23 @@ class NoPretrainDownEncoder(DownEncoder):
 def main() -> None:
     torch.manual_seed(2026)
 
-    record_path = PROJECT_ROOT / "data" / "processed" / "train.jsonl"
+    data_root = resolve_data_root()
+    record_path = data_root / "train.jsonl"
     with record_path.open("r", encoding="utf-8") as f:
         record = json.loads(f.readline())
 
-    front_path = PROJECT_ROOT / "data" / "processed" / record["front_image"]
-    down_path = PROJECT_ROOT / "data" / "processed" / record["down_image"]
+    front_path = data_root / record["front_image"]
+    down_path = data_root / record["down_image"]
 
     front_image = load_image(front_path)
     down_image = load_image(down_path)
     instruction = make_tokens(record["instruction"])
     altitude = torch.tensor([record["altitude"]], dtype=torch.float32)
+    target_yaw_feat = torch.tensor([target_relative_yaw_feature(record)], dtype=torch.float32)
+    uav_position_feat = torch.tensor(
+        [uav_local_position_feature(record, record.get("pose"), position_scale=100.0)],
+        dtype=torch.float32,
+    )
     target_action = torch.tensor(record["action"], dtype=torch.float32).unsqueeze(0)
 
     section("Sample")
@@ -112,7 +138,9 @@ def main() -> None:
     describe("down_image", down_image, "俯视 RGB 图像输入，格式为 (B, 3, H, W)。")
     describe("instruction", instruction, "文本指令 token ID；0 表示 padding。")
     describe("altitude", altitude, "无人机高度标量，HeightEncoder 支持 (B,) 或 (B, 1)。")
-    describe("target_action", target_action, "数据集监督动作标签 [dx, dy, dz, dyaw]。")
+    describe("target_yaw_feat", target_yaw_feat, "目标方向局部系中的当前 yaw 编码 [sin(yaw), cos(yaw)]；不包含目标坐标。")
+    describe("uav_position_feat", uav_position_feat, "当前 UAV 在目标方向局部系中的 xyz / 100；不包含目标坐标。")
+    describe("target_action", target_action, "目标方向局部系监督动作标签 [dx, dy, dz, dyaw]。")
 
     section("encoders.py")
     front_encoder = FrontEncoder(backbone="resnet50", pretrained=False, output_dim=512)
@@ -183,9 +211,9 @@ def main() -> None:
         multi_outputs = multi_policy(height_fused)
 
     describe("PolicyHead input", height_fused, "融合特征。")
-    describe("PolicyHead output pred_action", pred_action, "连续动作预测 [dx, dy, dz, dyaw]。")
+    describe("PolicyHead output pred_action", pred_action, "目标方向局部系连续动作预测 [dx, dy, dz, dyaw]。")
     describe("ProgressMonitor output progress", progress, "轨迹完成比例，范围为 [0, 1]。")
-    describe("MultiHeadPolicy output pred_action", multi_outputs["pred_action"], "多头策略中的连续动作预测。")
+    describe("MultiHeadPolicy output pred_action", multi_outputs["pred_action"], "多头策略中的目标方向局部系连续动作预测。")
     describe("MultiHeadPolicy output stop_logit", multi_outputs["stop_logit"], "停止判断原始 logit，训练时可接 BCEWithLogitsLoss。")
     describe("MultiHeadPolicy output progress", multi_outputs["progress"], "启用 use_progress_monitor=True 时输出的进度预测。")
 
@@ -203,7 +231,7 @@ def main() -> None:
                 outputs = model(front_image, down_image, instruction, altitude, return_features=True)
                 result = model.predict_action(front_image, down_image, instruction, altitude)
 
-            describe("forward output pred_action", outputs["pred_action"], "最终连续动作预测。")
+            describe("forward output pred_action", outputs["pred_action"], "最终目标方向局部系连续动作预测。")
             describe("forward output stop_logit", outputs["stop_logit"], "停止判断 logit。")
             describe("forward output progress", outputs.get("progress"), "启用进度头后的轨迹进度预测。")
             describe("forward output gate_weight", outputs.get("gate_weight"), "height_cond 策略的前视/俯视门控权重。")
@@ -213,11 +241,45 @@ def main() -> None:
             describe("forward output text_feat", outputs["text_feat"], "主模型内部句级文本特征。")
             describe("forward output height_feat", outputs["height_feat"], "主模型内部高度特征。")
             describe("forward output fused_feat", outputs["fused_feat"], "主模型内部融合特征。")
-            describe("predict_action action", result["action"], "推理接口返回的动作预测。")
+            describe("predict_action action", result["action"], "推理接口返回的目标方向局部系动作预测。")
             describe("predict_action stop_prob", result["stop_prob"], "停止概率，sigmoid(stop_logit)。")
             describe("predict_action stop", result["stop"], "stop_prob 是否超过 stop_threshold 的布尔结果。")
             describe("predict_action gate_weight", result.get("gate_weight"), "height_cond 策略推理时返回。")
             describe("predict_action attn_weight", result.get("attn_weight"), "cross_attn 策略推理时返回。")
+
+        print("\n--- HADVLNModelwithPosition fusion_type=height_cond ---")
+        model = had_module.HADVLNModelwithPosition(
+            fusion_type="height_cond",
+            use_progress_monitor=True,
+            position_hidden_dim=64,
+            position_dropout=0.0,
+        )
+        model.eval()
+        with torch.no_grad():
+            outputs = model(
+                front_image,
+                down_image,
+                instruction,
+                altitude,
+                target_yaw_feat,
+                uav_position_feat,
+                return_features=True,
+            )
+            result = model.predict_action(
+                front_image,
+                down_image,
+                instruction,
+                altitude,
+                target_yaw_feat,
+                uav_position_feat,
+            )
+        describe("position forward target_yaw_feat", outputs["target_yaw_feat"], "位置版新增模型输入之一：目标方向局部系当前 yaw 编码。")
+        describe("position forward target_yaw_encoded", outputs["target_yaw_encoded"], "TargetYawEncoder 输出特征。")
+        describe("position forward uav_position_feat", outputs["uav_position_feat"], "位置版新增模型输入之一：目标方向局部系当前 UAV xyz。")
+        describe("position forward uav_position_encoded", outputs["uav_position_encoded"], "UAVPositionEncoder 输出特征。")
+        describe("position forward base_fused_feat", outputs["base_fused_feat"], "原 HAD fusion 输出。")
+        describe("position forward fused_feat", outputs["fused_feat"], "拼接目标方向局部系 yaw 和 UAV 当前位置编码后送入策略头的融合特征。")
+        describe("position predict_action action", result["action"], "位置版推理返回的目标方向局部系动作预测。")
     finally:
         had_module.FrontEncoder = original_front
         had_module.DownEncoder = original_down

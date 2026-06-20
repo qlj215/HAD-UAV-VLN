@@ -10,7 +10,7 @@ evaluation:
   device: "auto"               # auto / cuda:0 / cpu
 
   # ---- Stop 判断阈值 ----
-  stop_threshold: 0.5          # sigmoid(stop_logit) > threshold -> 判定为 stop
+  stop_threshold: 0.3          # sigmoid(stop_logit) >= threshold -> 判定为 stop
 
   # ---- 轨迹评估条件 ----
   trajectory:

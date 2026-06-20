@@ -56,7 +56,7 @@ def test_source_defaults_match_models_py_signatures():
     assert text_sig.parameters["padding_idx"].default == 0
     assert text_sig.parameters["nhead"].default == 8
     assert model_forward_sig.parameters["return_features"].default is False
-    assert predict_sig.parameters["stop_threshold"].default == 0.7
+    assert predict_sig.parameters["stop_threshold"].default == 0.3
 
 
 def test_encoders_with_real_sample_inputs(sample_inputs):
@@ -242,6 +242,32 @@ def build_small_model(monkeypatch, fusion_type: str, use_progress_monitor=True):
     )
 
 
+def build_small_position_model(monkeypatch, fusion_type: str, use_progress_monitor=True):
+    monkeypatch.setattr(had_module, "FrontEncoder", NoPretrainFrontEncoder)
+    monkeypatch.setattr(had_module, "DownEncoder", NoPretrainDownEncoder)
+    return had_module.HADVLNModelwithPosition(
+        vis_backbone="resnet18",
+        vis_output_dim=16,
+        vis_shared=False,
+        lang_vocab_size=512,
+        lang_embedding_dim=8,
+        lang_hidden_dim=16,
+        lang_num_layers=1,
+        lang_encoder_type="lstm",
+        lang_bidirectional=True,
+        height_hidden_dim=8,
+        fusion_type=fusion_type,
+        fusion_hidden_dim=16,
+        fusion_num_heads=4,
+        policy_hidden_dims=(16,),
+        use_progress_monitor=use_progress_monitor,
+        position_hidden_dim=8,
+        uav_position_hidden_dim=8,
+        position_dropout=0.0,
+        dropout=0.0,
+    )
+
+
 @pytest.mark.parametrize("fusion_type", ["concat", "height_cond", "cross_attn"])
 def test_had_vln_model_forward_all_fusion_strategies(monkeypatch, sample_inputs, fusion_type):
     torch.manual_seed(4)
@@ -291,6 +317,41 @@ def test_had_vln_model_forward_all_fusion_strategies(monkeypatch, sample_inputs,
 
 
 @pytest.mark.parametrize("fusion_type", ["concat", "height_cond", "cross_attn"])
+def test_had_vln_model_with_position_forward(monkeypatch, sample_inputs, fusion_type):
+    torch.manual_seed(6)
+    model = build_small_position_model(monkeypatch, fusion_type, use_progress_monitor=True)
+    model.eval()
+
+    with torch.no_grad():
+        outputs = model(
+            sample_inputs["front_image"],
+            sample_inputs["down_image"],
+            sample_inputs["instruction"],
+            sample_inputs["altitude_column"],
+            sample_inputs["target_yaw_feat"],
+            sample_inputs["uav_position_feat"],
+            return_features=True,
+        )
+
+    assert_tensor(sample_inputs["target_yaw_feat"], (1, 2))
+    assert torch.allclose(
+        sample_inputs["target_yaw_feat"].norm(dim=-1),
+        torch.ones(1),
+        atol=1e-5,
+    )
+    assert_tensor(sample_inputs["uav_position_feat"], (1, 3))
+    assert_tensor(outputs["pred_action"], (1, 4))
+    assert_tensor(outputs["stop_logit"], (1, 1))
+    assert_probability_tensor(outputs["progress"], (1, 1))
+    assert_tensor(outputs["target_yaw_feat"], (1, 2))
+    assert_tensor(outputs["target_yaw_encoded"], (1, 8))
+    assert_tensor(outputs["uav_position_feat"], (1, 3))
+    assert_tensor(outputs["uav_position_encoded"], (1, 8))
+    assert_tensor(outputs["base_fused_feat"], (1, 16))
+    assert_tensor(outputs["fused_feat"], (1, 16))
+
+
+@pytest.mark.parametrize("fusion_type", ["concat", "height_cond", "cross_attn"])
 def test_had_vln_model_predict_action_all_fusion_strategies(monkeypatch, sample_inputs, fusion_type):
     torch.manual_seed(5)
     model = build_small_model(monkeypatch, fusion_type, use_progress_monitor=False)
@@ -321,3 +382,27 @@ def test_had_vln_model_predict_action_all_fusion_strategies(monkeypatch, sample_
     else:
         assert "gate_weight" not in result
         assert_probability_tensor(result["attn_weight"], (1, 4, 1, 3), sum_dim=-1)
+
+
+@pytest.mark.parametrize("fusion_type", ["concat", "height_cond", "cross_attn"])
+def test_had_vln_model_with_position_predict_action(monkeypatch, sample_inputs, fusion_type):
+    torch.manual_seed(7)
+    model = build_small_position_model(monkeypatch, fusion_type, use_progress_monitor=False)
+    model.train()
+
+    result = model.predict_action(
+        sample_inputs["front_image"],
+        sample_inputs["down_image"],
+        sample_inputs["instruction"],
+        sample_inputs["altitude"],
+        sample_inputs["target_yaw_feat"],
+        sample_inputs["uav_position_feat"],
+        stop_threshold=0.5,
+    )
+
+    assert model.training is True
+    assert_tensor(result["action"], (1, 4))
+    assert_tensor(result["stop_logit"], (1, 1))
+    assert_probability_tensor(result["stop_prob"], (1, 1))
+    assert isinstance(result["stop"], torch.Tensor)
+    assert result["stop"].dtype == torch.bool

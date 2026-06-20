@@ -81,6 +81,54 @@ FUSION_REGISTRY = {
 }
 
 
+class TargetYawEncoder(nn.Module):
+    """Encode target bearing [sin(relative_yaw), cos(relative_yaw)]."""
+
+    def __init__(self, hidden_dim: int = 64, dropout: float = 0.1):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.net = nn.Sequential(
+            nn.Linear(2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, target_yaw_feat: torch.Tensor) -> torch.Tensor:
+        target_yaw_feat = target_yaw_feat.view(-1, 2).to(
+            device=self.net[0].weight.device,
+            dtype=self.net[0].weight.dtype,
+        )
+        return self.net(target_yaw_feat)
+
+
+class UAVPositionEncoder(nn.Module):
+    """Encode current UAV local xyz in the trajectory-start body frame."""
+
+    def __init__(self, hidden_dim: int = 64, dropout: float = 0.1):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.net = nn.Sequential(
+            nn.Linear(3, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, uav_position_feat: torch.Tensor) -> torch.Tensor:
+        uav_position_feat = uav_position_feat.view(-1, 3).to(
+            device=self.net[0].weight.device,
+            dtype=self.net[0].weight.dtype,
+        )
+        return self.net(uav_position_feat)
+
+
 class HADVLNModel(nn.Module):
     """HAD 双视角视觉语言导航模型。
 
@@ -102,9 +150,13 @@ class HADVLNModel(nn.Module):
     def __init__(
         self,
         # Vision
+        vis_pretrained: bool = True,
+        vis_freeze_bn: bool = True,
         vis_backbone: str = "resnet50",
         vis_output_dim: int = 512,
         vis_shared: bool = False,
+        vis_train_backbone: bool = True,
+        vision_mode: str = "dual",
         # Language
         lang_vocab_size: int = 5000,
         lang_embedding_dim: int = 300,
@@ -122,28 +174,47 @@ class HADVLNModel(nn.Module):
         fusion_num_heads: int = 8,
         # Policy
         policy_hidden_dims: Tuple[int, ...] = (512, 256),
+        policy_yaw_strategy: str = "baseline",
         use_progress_monitor: bool = False,
+        use_dz_sign_aux: bool = False,
+        dz_sign_hidden_dim: int = 128,
+        use_height: bool = True,
+        use_language: bool = True,
+        fixed_gate_alpha: Optional[float] = None,
         # General
         dropout: float = 0.2,
     ):
         super().__init__()
 
+        if vision_mode not in {"dual", "front_only", "down_only"}:
+            raise ValueError(
+                f"未知视觉模式: {vision_mode}. 可选: dual/front_only/down_only"
+            )
         self.fusion_type = fusion_type
+        self.vision_mode = vision_mode
+        self.use_height = use_height
+        self.use_language = use_language
+        self.vis_train_backbone = vis_train_backbone
 
         # ---- 编码器 ----
         self.front_encoder = FrontEncoder(
             backbone=vis_backbone,
-            pretrained=True,
+            pretrained=vis_pretrained,
             output_dim=vis_output_dim,
+            freeze_bn=vis_freeze_bn,
         )
         if vis_shared:
             self.down_encoder = self.front_encoder
         else:
             self.down_encoder = DownEncoder(
                 backbone=vis_backbone,
-                pretrained=True,
+                pretrained=vis_pretrained,
                 output_dim=vis_output_dim,
+                freeze_bn=vis_freeze_bn,
             )
+        self.front_encoder.set_train_backbone(vis_train_backbone)
+        if self.down_encoder is not self.front_encoder:
+            self.down_encoder.set_train_backbone(vis_train_backbone)
 
         self.text_encoder = TextEncoder(
             vocab_size=lang_vocab_size,
@@ -176,6 +247,8 @@ class HADVLNModel(nn.Module):
             hidden_dim=fusion_hidden_dim,
             dropout=dropout,
         )
+        if fusion_type == "height_cond":
+            fusion_kwargs["fixed_gate_alpha"] = fixed_gate_alpha
         if fusion_type == "cross_attn":
             fusion_kwargs["num_heads"] = fusion_num_heads
 
@@ -186,7 +259,10 @@ class HADVLNModel(nn.Module):
             input_dim=fusion_hidden_dim,
             policy_hidden_dims=policy_hidden_dims,
             use_progress_monitor=use_progress_monitor,
+            use_dz_sign_aux=use_dz_sign_aux,
+            dz_sign_hidden_dim=dz_sign_hidden_dim,
             dropout=dropout,
+            yaw_strategy=policy_yaw_strategy,
         )
 
         # 暴露关键维度 (方便外部调参)
@@ -195,6 +271,43 @@ class HADVLNModel(nn.Module):
         self.height_hidden_dim = height_hidden_dim
         self.fusion_hidden_dim = fusion_hidden_dim
 
+    def encode_and_fuse(
+        self,
+        front_image: torch.Tensor,
+        down_image: torch.Tensor,
+        instruction: torch.Tensor,
+        altitude: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Dict[str, torch.Tensor]]:
+        """Encode core HAD inputs and return fused feature plus analysis tensors."""
+        if self.vision_mode == "front_only":
+            F_front = self.front_encoder(front_image)      # (B, vis_dim)
+            F_down = torch.zeros_like(F_front)
+        elif self.vision_mode == "down_only":
+            F_down = self.down_encoder(down_image)         # (B, vis_dim)
+            F_front = torch.zeros_like(F_down)
+        else:
+            F_front = self.front_encoder(front_image)      # (B, vis_dim)
+            F_down = self.down_encoder(down_image)         # (B, vis_dim)
+
+        if self.use_language:
+            F_text, _ = self.text_encoder(instruction)     # (B, text_dim)
+        else:
+            F_text = front_image.new_zeros(front_image.size(0), self.text_output_dim)
+
+        if self.use_height:
+            F_height = self.height_encoder(altitude)       # (B, height_dim)
+        else:
+            F_height = front_image.new_zeros(front_image.size(0), self.height_hidden_dim)
+
+        fused, fusion_aux = self.fusion(F_front, F_down, F_text, F_height)
+        feature_dict = {
+            "height_feat": F_height,
+            "front_feat": F_front,
+            "down_feat": F_down,
+            "text_feat": F_text,
+        }
+        return fused, fusion_aux, feature_dict
+
     def forward(
         self,
         front_image: torch.Tensor,
@@ -202,6 +315,7 @@ class HADVLNModel(nn.Module):
         instruction: torch.Tensor,
         altitude: torch.Tensor,
         return_features: bool = False,
+        step_ids: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Args:
@@ -220,18 +334,11 @@ class HADVLNModel(nn.Module):
               - down_feat:    (B, D)  俯视特征
               - progress:     (B, 1)  (如果启用)
         """
-        # 1. 编码
-        F_front = self.front_encoder(front_image)          # (B, vis_dim)
-        F_down = self.down_encoder(down_image)             # (B, vis_dim)
-        F_text, _ = self.text_encoder(instruction)         # (B, text_dim)
-        F_height = self.height_encoder(altitude)           # (B, height_dim)
+        fused, fusion_aux, feature_dict = self.encode_and_fuse(
+            front_image, down_image, instruction, altitude
+        )
 
-        # 2. 融合
-        fused, fusion_aux = self.fusion(F_front, F_down, F_text, F_height)
-        # fused: (B, fusion_dim), gate: (B, 2) or None
-
-        # 3. 策略输出
-        outputs = self.policy(fused)
+        outputs = self.policy(fused, step_ids=step_ids)
 
         if self.fusion_type == "height_cond":
             outputs["gate_weight"] = fusion_aux
@@ -241,10 +348,7 @@ class HADVLNModel(nn.Module):
 
         # 附加中间特征 (供分析和辅助损失使用)
         if return_features:
-            outputs["height_feat"] = F_height
-            outputs["front_feat"] = F_front
-            outputs["down_feat"] = F_down
-            outputs["text_feat"] = F_text
+            outputs.update(feature_dict)
             outputs["fused_feat"] = fused
 
         return outputs
@@ -256,7 +360,8 @@ class HADVLNModel(nn.Module):
         down_image: torch.Tensor,
         instruction: torch.Tensor,
         altitude: torch.Tensor,
-        stop_threshold: float = 0.7,
+        stop_threshold: float = 0.3,
+        step_ids: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """推理模式: 预测单个/批次动作。"""
 
@@ -269,11 +374,12 @@ class HADVLNModel(nn.Module):
             instruction,
             altitude,
             return_features=False,
+            step_ids=step_ids,
         )
 
         stop_logit = outputs.get("stop_logit")
         stop_prob = torch.sigmoid(stop_logit) if stop_logit is not None else None
-        stop = stop_prob > stop_threshold if stop_prob is not None else None
+        stop = stop_prob >= stop_threshold if stop_prob is not None else None
 
         result = {
             "action": outputs["pred_action"],
@@ -291,4 +397,131 @@ class HADVLNModel(nn.Module):
         if was_training:
             self.train()
 
+        return result
+
+
+class HADVLNModelwithPosition(HADVLNModel):
+    """HAD model variant with navigation state features.
+
+    Extra inputs:
+      - target_yaw_feat: [sin(relative_yaw), cos(relative_yaw)]
+      - uav_position_feat: current UAV local xyz in the trajectory-start body
+        frame, normalized by the dataset.
+
+    target_position is consumed only by the dataset to derive target_yaw_feat;
+    target coordinates and target distance are not fed to the model.
+    """
+
+    def __init__(
+        self,
+        position_hidden_dim: int = 64,
+        uav_position_hidden_dim: Optional[int] = None,
+        position_dropout: float = 0.1,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        if uav_position_hidden_dim is None:
+            uav_position_hidden_dim = position_hidden_dim
+        self.target_yaw_encoder = TargetYawEncoder(
+            hidden_dim=position_hidden_dim,
+            dropout=position_dropout,
+        )
+        self.uav_position_encoder = UAVPositionEncoder(
+            hidden_dim=uav_position_hidden_dim,
+            dropout=position_dropout,
+        )
+        self.position_fusion = nn.Sequential(
+            nn.Linear(
+                self.fusion_hidden_dim + position_hidden_dim + uav_position_hidden_dim,
+                self.fusion_hidden_dim,
+            ),
+            nn.LayerNorm(self.fusion_hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(position_dropout),
+            nn.Linear(self.fusion_hidden_dim, self.fusion_hidden_dim),
+            nn.LayerNorm(self.fusion_hidden_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.position_hidden_dim = position_hidden_dim
+        self.uav_position_hidden_dim = uav_position_hidden_dim
+
+    def forward(
+        self,
+        front_image: torch.Tensor,
+        down_image: torch.Tensor,
+        instruction: torch.Tensor,
+        altitude: torch.Tensor,
+        target_yaw_feat: torch.Tensor,
+        uav_position_feat: torch.Tensor,
+        return_features: bool = False,
+        step_ids: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        fused, fusion_aux, feature_dict = self.encode_and_fuse(
+            front_image, down_image, instruction, altitude
+        )
+        target_yaw_encoded = self.target_yaw_encoder(target_yaw_feat)
+        uav_position_encoded = self.uav_position_encoder(uav_position_feat)
+        fused_with_position = self.position_fusion(
+            torch.cat([fused, target_yaw_encoded, uav_position_encoded], dim=-1)
+        )
+        outputs = self.policy(fused_with_position, step_ids=step_ids)
+
+        if self.fusion_type == "height_cond":
+            outputs["gate_weight"] = fusion_aux
+        elif self.fusion_type == "cross_attn":
+            outputs["attn_weight"] = fusion_aux
+
+        if return_features:
+            outputs.update(feature_dict)
+            outputs["base_fused_feat"] = fused
+            outputs["target_yaw_feat"] = target_yaw_feat
+            outputs["target_yaw_encoded"] = target_yaw_encoded
+            outputs["uav_position_feat"] = uav_position_feat
+            outputs["uav_position_encoded"] = uav_position_encoded
+            outputs["fused_feat"] = fused_with_position
+
+        return outputs
+
+    @torch.no_grad()
+    def predict_action(
+        self,
+        front_image: torch.Tensor,
+        down_image: torch.Tensor,
+        instruction: torch.Tensor,
+        altitude: torch.Tensor,
+        target_yaw_feat: torch.Tensor,
+        uav_position_feat: torch.Tensor,
+        stop_threshold: float = 0.3,
+        step_ids: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        was_training = self.training
+        self.eval()
+
+        outputs = self.forward(
+            front_image,
+            down_image,
+            instruction,
+            altitude,
+            target_yaw_feat,
+            uav_position_feat,
+            return_features=False,
+            step_ids=step_ids,
+        )
+
+        stop_logit = outputs.get("stop_logit")
+        stop_prob = torch.sigmoid(stop_logit) if stop_logit is not None else None
+        stop = stop_prob >= stop_threshold if stop_prob is not None else None
+
+        result = {
+            "action": outputs["pred_action"],
+            "stop_logit": stop_logit,
+            "stop_prob": stop_prob,
+            "stop": stop,
+        }
+        if "gate_weight" in outputs:
+            result["gate_weight"] = outputs["gate_weight"]
+        if "attn_weight" in outputs:
+            result["attn_weight"] = outputs["attn_weight"]
+        if was_training:
+            self.train()
         return result

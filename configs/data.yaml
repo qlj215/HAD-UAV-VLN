@@ -9,13 +9,13 @@ dataset:
 
 # ---- 原始数据路径 (TravelUAV 格式) ----
 raw_data:
-  trajectory_dir: "./TravelUAVData"
+  trajectory_dir: ""
   instruction_file: ""
   image_dir: ""
 
 # ---- 处理后数据路径 (JSONL 格式) ----
 processed_data:
-  save_dir: "./data/processed_4_full_classes/"
+  save_dir: "/root/autodl-tmp/TravelUAVProcessedData_mini"
   train_anno: "train.jsonl"
   val_seen_anno: "val_seen.jsonl"
   val_unseen_anno: "val_unseen.jsonl"

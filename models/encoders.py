@@ -62,6 +62,8 @@ class VisualEncoder(nn.Module):
     ):
         super().__init__()
         self.backbone_name = backbone
+        self.freeze_bn = freeze_bn
+        self.train_backbone = True
 
         if "resnet" in backbone:
             resnets = {
@@ -87,7 +89,7 @@ class VisualEncoder(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        if freeze_bn:
+        if self.freeze_bn:
             self._freeze_bn()
 
     def _freeze_bn(self):
@@ -96,6 +98,24 @@ class VisualEncoder(nn.Module):
                 m.eval()
                 for p in m.parameters():
                     p.requires_grad = False
+
+    def set_train_backbone(self, train_backbone: bool) -> None:
+        """Enable/disable gradients for the CNN/ViT backbone only."""
+        self.train_backbone = bool(train_backbone)
+        for p in self.cnn.parameters():
+            p.requires_grad = self.train_backbone
+        if not self.train_backbone:
+            self.cnn.eval()
+        if self.freeze_bn:
+            self._freeze_bn()
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if not self.train_backbone:
+            self.cnn.eval()
+        if self.freeze_bn:
+            self._freeze_bn()
+        return self
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         """

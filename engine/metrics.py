@@ -26,6 +26,23 @@ TRAJECTORY_METRICS = ("ne", "sr", "osr", "spl")
 TRAJECTORY_STAGES = ("high", "mid", "low")
 
 
+def wrap_angle_diff(diff: torch.Tensor) -> torch.Tensor:
+    """Wrap radian angle differences into [-pi, pi]."""
+    return torch.atan2(torch.sin(diff), torch.cos(diff))
+
+
+def compute_action_error(
+    pred_action: torch.Tensor,
+    gt_action: torch.Tensor,
+) -> torch.Tensor:
+    """Return action error with dyaw interpreted as a circular radian angle."""
+    diff = pred_action - gt_action
+    if diff.size(-1) >= 4:
+        diff = diff.clone()
+        diff[..., 3] = wrap_angle_diff(diff[..., 3])
+    return diff
+
+
 def compute_metrics(
     pred_action: torch.Tensor,
     gt_action: torch.Tensor,
@@ -33,13 +50,13 @@ def compute_metrics(
     gt_done: Optional[torch.Tensor] = None,
     altitude: Optional[torch.Tensor] = None,
     height_stage: Optional[torch.Tensor] = None,
-    stop_threshold: float = 0.5,
+    stop_threshold: float = 0.3,
 ) -> Dict[str, float]:
     """Compute action-level metrics for one batch."""
     metrics: Dict[str, float] = {}
 
     if gt_done is not None:
-        not_done = (gt_done < 0.5).squeeze()
+        not_done = (gt_done < 0.5).view(-1)
     else:
         not_done = torch.ones(
             pred_action.size(0), dtype=torch.bool, device=pred_action.device
@@ -47,7 +64,7 @@ def compute_metrics(
 
     action_count = not_done.sum().item()
     if action_count > 0:
-        diff = pred_action[not_done] - gt_action[not_done]
+        diff = compute_action_error(pred_action[not_done], gt_action[not_done])
         mse_per_dim = (diff ** 2).mean(dim=0)
         mae_per_dim = diff.abs().mean(dim=0)
 
@@ -89,9 +106,9 @@ def compute_metrics(
             metrics[f"action_count_{stage_name}"] = 0
 
     if stop_logit is not None and gt_done is not None:
-        stop_prob = torch.sigmoid(stop_logit).squeeze()
-        stop_pred = (stop_prob > stop_threshold).float()
-        gt_done_flat = gt_done.float().squeeze()
+        stop_prob = torch.sigmoid(stop_logit).view(-1)
+        stop_pred = (stop_prob >= stop_threshold).float()
+        gt_done_flat = gt_done.float().view(-1)
 
         tp = ((stop_pred == 1) & (gt_done_flat == 1)).sum().item()
         tn = ((stop_pred == 0) & (gt_done_flat == 0)).sum().item()
@@ -185,7 +202,7 @@ def compute_trajectory_metrics(
     samples: Optional[Sequence[Dict[str, Any]]] = None,
     simulator: Optional[Any] = None,
     success_threshold: float = 20.0,
-    stop_threshold: float = 0.5,
+    stop_threshold: float = 0.3,
     max_steps: int = 200,
     prefix: str = "trajectory",
 ) -> Dict[str, Optional[float]]:
@@ -228,10 +245,10 @@ def compute_action_mse_only(
 ) -> torch.Tensor:
     """Compute action MSE, optionally ignoring terminal steps."""
     if gt_done is not None:
-        not_done = (gt_done < 0.5).squeeze()
+        not_done = (gt_done < 0.5).view(-1)
         if not_done.sum() == 0:
             return torch.tensor(0.0, device=pred_action.device)
-        diff = pred_action[not_done] - gt_action[not_done]
+        diff = compute_action_error(pred_action[not_done], gt_action[not_done])
     else:
-        diff = pred_action - gt_action
+        diff = compute_action_error(pred_action, gt_action)
     return (diff ** 2).mean()

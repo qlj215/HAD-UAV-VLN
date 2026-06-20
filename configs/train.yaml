@@ -6,7 +6,7 @@
 
 training:
   # ---- 基础参数 ----
-  epochs: 100                   # 训练轮数
+  epochs: 30                   # 训练轮数
   batch_size: 1024               # 小数据集用较小 batch
   num_workers: 2               # DataLoader 子进程数
 

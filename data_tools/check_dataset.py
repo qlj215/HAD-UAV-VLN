@@ -110,6 +110,10 @@ LOW_ALT_MAX = 10.0
 MID_ALT_MAX = 30.0
 
 
+def wrap_angle_rad(angle: float) -> float:
+    return math.atan2(math.sin(float(angle)), math.cos(float(angle)))
+
+
 # ================================================================
 # 工具函数
 # ================================================================
@@ -821,7 +825,11 @@ def analyze_actions(
     # 9.1 各维度统计
     dims = ["dx", "dy", "dz", "dyaw"]
     dim_values = {
-        dim: [a[i] for a in actions] for i, dim in enumerate(dims)
+        dim: [
+            wrap_angle_rad(a[i]) if dim == "dyaw" else a[i]
+            for a in actions
+        ]
+        for i, dim in enumerate(dims)
     }
     per_dim = {}
     for dim, vals in dim_values.items():
