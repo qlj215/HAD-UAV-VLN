@@ -21,13 +21,16 @@ env/
 # Data and generated artifacts
 data/
 TravelUAVData/
+TravelUAVData
 outputs/
 eval_outputs/
+sim_eval_outputs/
 runs/
 wandb/
 logs/
 
 # Model weights and checkpoints
+local_checkpoints/
 *.ckpt
 *.pt
 *.pth
