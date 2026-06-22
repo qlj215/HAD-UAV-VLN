@@ -218,13 +218,28 @@ def load_case(traj_dir: Path, scene: str) -> Optional[TrajectoryCase]:
     )
 
 
-def select_cases(raw_data_dir: Path, scene: str, limit: int, start_index: int = 0) -> List[TrajectoryCase]:
+def select_cases(
+    raw_data_dir: Path,
+    scene: str,
+    limit: int,
+    start_index: int = 0,
+    trajectory_ids: Optional[List[str]] = None,
+) -> List[TrajectoryCase]:
     cases: List[TrajectoryCase] = []
-    for traj_dir in list_trajectory_dirs(raw_data_dir, scene)[start_index:]:
+    if trajectory_ids:
+        traj_dirs = [(raw_data_dir / scene / str(traj_id)) for traj_id in trajectory_ids]
+    else:
+        traj_dirs = list_trajectory_dirs(raw_data_dir, scene)[start_index:]
+
+    missing = [str(path) for path in traj_dirs if not path.exists()]
+    if missing:
+        raise FileNotFoundError("Trajectory directory not found: " + ", ".join(missing))
+
+    for traj_dir in traj_dirs:
         case = load_case(traj_dir, scene)
         if case is not None:
             cases.append(case)
-        if len(cases) >= limit:
+        if not trajectory_ids and len(cases) >= limit:
             break
     if not cases:
         raise RuntimeError(f"No usable trajectories found under {raw_data_dir / scene}")
@@ -769,6 +784,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scene", default="BrushifyCountryRoads")
     parser.add_argument("--num_trajectories", type=int, default=1)
     parser.add_argument("--start_index", type=int, default=0)
+    parser.add_argument(
+        "--trajectory_ids",
+        nargs="+",
+        default=None,
+        help="Optional exact trajectory directory names to evaluate within --scene",
+    )
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--image_size", type=int, nargs=2, default=[224, 224])
@@ -813,6 +834,7 @@ def main() -> None:
             scene=args.scene,
             limit=args.num_trajectories,
             start_index=args.start_index,
+            trajectory_ids=args.trajectory_ids,
         )
         device = resolve_device(args.device)
         print(f"[INFO] Device: {device}", flush=True)
