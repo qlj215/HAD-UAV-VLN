@@ -5,7 +5,7 @@
 
 evaluation:
   # ---- 评估参数 ----
-  batch_size: 16               # 评估 batch size (可比训练大)
+  batch_size: 2048               # 评估 batch size (可比训练大)
   num_workers: 2
   device: "auto"               # auto / cuda:0 / cpu
 

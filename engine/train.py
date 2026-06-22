@@ -29,10 +29,16 @@ import argparse
 import json
 import os
 import platform
+import random
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+
+try:
+    import numpy as np
+except ImportError:  # numpy is expected in training envs, but seed setup should not hard-fail here.
+    np = None
 
 import torch
 import torch.nn as nn
@@ -879,6 +885,31 @@ def unwrap_config_section(cfg: dict, section: str) -> dict:
     return nested if isinstance(nested, dict) else cfg
 
 
+def seed_everything(seed: int, deterministic: bool = True) -> None:
+    """Set all training RNG seeds used by Python, NumPy, PyTorch and CUDA."""
+    seed = int(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    if np is not None:
+        np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    if deterministic and torch.backends.cudnn.is_available():
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def seed_worker(worker_id: int) -> None:
+    """Initialize DataLoader worker RNGs from PyTorch worker seed."""
+    worker_seed = torch.initial_seed() % 2**32
+    random.seed(worker_seed)
+    if np is not None:
+        np.random.seed(worker_seed)
+
+
 def resolve_output_dir(cli_output_dir: Optional[str], train_cfg: dict) -> Path:
     """输出目录优先级: CLI > YAML 显式目录 > YAML 根目录/运行名 > output/时间戳。"""
     if cli_output_dir:
@@ -1121,6 +1152,14 @@ def main():
     train_cfg = unwrap_config_section(load_yaml(args.train_config), "training")
     config = {"data": data_cfg, "model": model_cfg, "training": train_cfg}
 
+    # ---- 随机种子 ----
+    seed = int(train_cfg.get("seed", 42))
+    deterministic = bool(train_cfg.get("deterministic", True))
+    train_cfg["seed"] = seed
+    train_cfg["deterministic"] = deterministic
+    seed_everything(seed, deterministic=deterministic)
+    print(f"[INFO] Seed: {seed} (deterministic={deterministic})")
+
     # ---- 设备 ----
     if args.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1174,14 +1213,20 @@ def main():
 
     batch_size = train_cfg.get("batch_size", 16)
     num_workers = train_cfg.get("num_workers", 4)
+    train_generator = torch.Generator()
+    train_generator.manual_seed(seed)
+    val_generator = torch.Generator()
+    val_generator.manual_seed(seed + 1)
 
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
         collate_fn=had_collate_fn, num_workers=num_workers, pin_memory=True,
+        worker_init_fn=seed_worker, generator=train_generator,
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
         collate_fn=had_collate_fn, num_workers=num_workers, pin_memory=True,
+        worker_init_fn=seed_worker, generator=val_generator,
     )
 
     # ---- 模型 ----
