@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 
 if [[ -n "${PYTHON_BIN:-}" ]]; then
@@ -26,12 +26,11 @@ if [[ "${QUICK:-0}" == "1" ]]; then
   EPOCHS="${EPOCHS:-1}"
 else
   DATA_DIR="${DATA_DIR:-/root/autodl-tmp/TravelUAVProcessedData_target_aligned}"
-  # 上一轮多数 best epoch 在 9-13；默认 12 轮用于小 batch 快速筛查。
-  EPOCHS="${EPOCHS:-12}"
+  EPOCHS="${EPOCHS:-15}"
 fi
 
 OUTPUT_BASE="${OUTPUT_BASE:-/root/autodl-tmp/HAD_UAV_VLN_experiments}"
-RUN_GROUP="${RUN_GROUP:-ha_dvf_dz_sign_small_batch_tuning_$(date +%Y%m%d_%H%M%S)}"
+RUN_GROUP="${RUN_GROUP:-ha_dvf_dz_sign_tuning_$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="${RUN_DIR:-${OUTPUT_BASE}/${RUN_GROUP}}"
 CONFIG_DIR="${RUN_DIR}/generated_configs"
 PROGRESS_LOG="${PROGRESS_LOG:-${RUN_DIR}/progress_log.tsv}"
@@ -56,7 +55,7 @@ mkdir -p "${RUN_DIR}" "${CONFIG_DIR}"
 if [[ ! -f "${PROGRESS_LOG}" ]]; then
   printf "time\tstage\texperiment\tdetail\n" > "${PROGRESS_LOG}"
 fi
-ln -sfn "${RUN_DIR}" "${OUTPUT_BASE}/latest_dz_sign_small_batch_tuning"
+ln -sfn "${RUN_DIR}" "${OUTPUT_BASE}/latest_dz_sign_tuning"
 
 log_event() {
   local stage="$1"
@@ -142,6 +141,7 @@ data.setdefault("instruction", {})["max_length"] = int(max_inst_len)
 data.setdefault("instruction", {})["vocab_size"] = int(vocab_size)
 data.setdefault("instruction", {})["vocab_path"] = str(Path(data_dir) / "vocab.json")
 
+# Fixed HA-DVF policy: dual-view + height-conditioned fusion + position input.
 model["name"] = "HAD_VLN_POSITION"
 model.setdefault("vision", {}).update({
     "backbone": backbone,
@@ -199,7 +199,7 @@ model["ablation"] = {
     "use_position": True,
     "yaw_ablation": "rule_gated_expert",
     "dz_ablation": "sign_aux",
-    "small_batch_tuning": {
+    "tuning": {
         "learning_rate": float(lr),
         "batch_size": int(train_batch),
         "dz_smooth_l1_beta": float(dz_beta),
@@ -262,7 +262,7 @@ loss.update({
 })
 train.setdefault("gradient_clip", {}).update({"enable": True, "max_norm": 5.0})
 train.setdefault("logging", {}).update({
-    "log_interval": 50,
+    "log_interval": 20,
     "eval_interval": 1,
     "save_interval": n_epochs + 1,
 })
@@ -400,22 +400,25 @@ run_experiment() {
   done
 }
 
-# Fixed best setting from the previous tuning round:
-# lr=5e-5, beta=0.5, sign_weight=0.2, dz_weight=3.0.
-# Main question here: does reducing batch below 96 improve dz?
 EXPERIMENT_GRID=(
-  "bs16_lr5e-5_beta0.5_sign0.2_dzw3|5.0e-5|16|0.5|0.2|3.0"
-  "bs24_lr5e-5_beta0.5_sign0.2_dzw3|5.0e-5|24|0.5|0.2|3.0"
-  "bs32_lr5e-5_beta0.5_sign0.2_dzw3|5.0e-5|32|0.5|0.2|3.0"
-  "bs48_lr5e-5_beta0.5_sign0.2_dzw3|5.0e-5|48|0.5|0.2|3.0"
-  "bs64_lr5e-5_beta0.5_sign0.2_dzw3|5.0e-5|64|0.5|0.2|3.0"
-  "bs80_lr5e-5_beta0.5_sign0.2_dzw3|5.0e-5|80|0.5|0.2|3.0"
-  "bs96_lr5e-5_beta0.5_sign0.2_dzw3|5.0e-5|96|0.5|0.2|3.0"
-  "bs128_lr5e-5_beta0.5_sign0.2_dzw3|5.0e-5|128|0.5|0.2|3.0"
-  "bs32_lr3e-5_beta0.5_sign0.2_dzw3|3.0e-5|32|0.5|0.2|3.0"
-  "bs32_lr1e-4_beta0.5_sign0.2_dzw3|1.0e-4|32|0.5|0.2|3.0"
-  "bs64_lr3e-5_beta0.5_sign0.2_dzw3|3.0e-5|64|0.5|0.2|3.0"
-  "bs64_lr1e-4_beta0.5_sign0.2_dzw3|1.0e-4|64|0.5|0.2|3.0"
+  "base_lr1e-4_bs192_beta0.5_sign0.2_dzw3|1.0e-4|192|0.5|0.2|3.0"
+  "lr3e-5_bs192_beta0.5_sign0.2_dzw3|3.0e-5|192|0.5|0.2|3.0"
+  "lr5e-5_bs192_beta0.5_sign0.2_dzw3|5.0e-5|192|0.5|0.2|3.0"
+  "lr2e-4_bs192_beta0.5_sign0.2_dzw3|2.0e-4|192|0.5|0.2|3.0"
+  "lr5e-5_bs96_beta0.5_sign0.2_dzw3|5.0e-5|96|0.5|0.2|3.0"
+  "lr5e-5_bs128_beta0.5_sign0.2_dzw3|5.0e-5|128|0.5|0.2|3.0"
+  "lr5e-5_bs256_beta0.5_sign0.2_dzw3|5.0e-5|256|0.5|0.2|3.0"
+  "lr5e-5_bs320_beta0.5_sign0.2_dzw3|5.0e-5|320|0.5|0.2|3.0"
+  "lr5e-5_bs192_beta0.25_sign0.2_dzw3|5.0e-5|192|0.25|0.2|3.0"
+  "lr5e-5_bs192_beta1.0_sign0.2_dzw3|5.0e-5|192|1.0|0.2|3.0"
+  "lr5e-5_bs192_beta1.5_sign0.2_dzw3|5.0e-5|192|1.5|0.2|3.0"
+  "lr5e-5_bs192_beta0.5_sign0.05_dzw3|5.0e-5|192|0.5|0.05|3.0"
+  "lr5e-5_bs192_beta0.5_sign0.1_dzw3|5.0e-5|192|0.5|0.1|3.0"
+  "lr5e-5_bs192_beta0.5_sign0.4_dzw3|5.0e-5|192|0.5|0.4|3.0"
+  "lr5e-5_bs192_beta0.5_sign0.1_dzw2|5.0e-5|192|0.5|0.1|2.0"
+  "lr5e-5_bs192_beta0.5_sign0.1_dzw4|5.0e-5|192|0.5|0.1|4.0"
+  "combo_lr5e-5_bs128_beta1.0_sign0.1_dzw2|5.0e-5|128|1.0|0.1|2.0"
+  "combo_lr3e-5_bs256_beta1.0_sign0.1_dzw3|3.0e-5|256|1.0|0.1|3.0"
 )
 
 log_event "START" "all" "run_dir=${RUN_DIR}; data_dir=${DATA_DIR}; epochs=${EPOCHS}; eval_splits=${SPLITS}"
