@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Capture TravelUAV initial render frames after controlled simContinueForFrames calls."""
+"""Capture initial frames after controlled ``simContinueForFrames`` calls.
+
+This is an archived, one-off warmup diagnostic rather than a recommended
+evaluation entry. From the repository root, the smallest current-host run is::
+
+    .venv/bin/python scripts/simulation/archive/capture_initial_render_warmup_frames.py \
+      --output-dir sim_eval_outputs/archive/debug/warmup_frames
+
+The scene, trajectory, data roots, and increments have host-specific defaults.
+Use ``--help`` before overriding them; use ``run_debug.sh`` for new diagnostics.
+"""
 from __future__ import annotations
 
 import argparse

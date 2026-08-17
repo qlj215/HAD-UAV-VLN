@@ -1,7 +1,17 @@
 """CLI and compatibility facade for HAD closed-loop TravelUAV evaluation.
 
-The implementation lives in :mod:`engine.simulation`.  This module deliberately
-keeps the historical import path used by diagnostics and experiment scripts.
+Use the short shell entries for normal work::
+
+    scripts/simulation/run_eval.sh --split val_seen
+    scripts/simulation/run_debug.sh --scene BrushifyCountryRoads \
+      --trajectory-id 0008c004-9c02-40d3-928f-b7228c17a39d
+
+Append ``--dry-run`` to either command to inspect the resolved configuration
+without starting AirSim. The many direct Python flags are advanced overrides;
+see ``docs/simulation_usage.md`` instead of reconstructing them from memory.
+
+The implementation lives in :mod:`engine.simulation`. This module keeps the
+historical import path used by diagnostics and experiment scripts.
 """
 
 from __future__ import annotations

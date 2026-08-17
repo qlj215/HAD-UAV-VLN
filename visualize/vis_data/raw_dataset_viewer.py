@@ -1,3 +1,11 @@
+"""Browse a raw TravelUAV dataset in Streamlit.
+
+From the repository root::
+
+    streamlit run visualize/vis_data/raw_dataset_viewer.py \
+      --server.port 8599 -- /path/to/TravelUAVData
+"""
+
 # dataset_viewer.py
 # ------------------------------------------------------------
 # HAD-UAV-VLN / TravelUAV 原始数据集可视化网页
@@ -25,7 +33,7 @@
 #   pip install streamlit plotly pandas pillow
 #
 # 运行：
-#   streamlit run raw_dataset_viewer.py --server.address 0.0.0.0 --server.port 8599 -- /path/to/A
+#   streamlit run visualize/vis_data/raw_dataset_viewer.py --server.address 0.0.0.0 --server.port 8599 -- /path/to/A
 #
 # 本地浏览器访问服务器网页：
 #   ssh -L 8599:127.0.0.1:8599 user@host -p PORT

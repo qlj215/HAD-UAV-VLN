@@ -1,3 +1,11 @@
+"""Browse offline/legacy evaluation outputs in Streamlit.
+
+From the repository root::
+
+    streamlit run visualize/vis_eval/eval_log_viewer.py \
+      --server.port 8502 -- /path/to/eval_output_dir
+"""
+
 # eval_log_viewer.py
 # 功能：
 #   1) 读取一次验证输出目录：config.json / eval_overall.json / eval_trajectory.json / eval_by_height.json / predictions.jsonl
@@ -9,11 +17,10 @@
 #   pip install streamlit plotly pandas
 #
 # 运行：
-#   streamlit run vis_eval/eval_log_viewer.py --server.address 0.0.0.0 --server.port 8502 -- /path/to/eval_output_dir
+#   streamlit run visualize/vis_eval/eval_log_viewer.py --server.address 0.0.0.0 --server.port 8502 -- /path/to/eval_output_dir
 #
 # 说明：
-#   项目根目录下 vis_eval/eval_log_viewer.py 是兼容入口，实际代码位于
-#   visualize/vis_eval/eval_log_viewer.py。
+#   当前权威入口就是 visualize/vis_eval/eval_log_viewer.py。
 
 import json
 import math

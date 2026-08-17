@@ -1,6 +1,6 @@
 # HAD-UAV-VLN 项目时间线
 
-更新时间：2026-07-10
+更新时间：2026-08-17
 
 本时间线只汇总已有报告能够支持的结论。历史报告已原文归档，路径映射见 [`reports/archive/README.md`](archive/README.md)。
 
@@ -16,9 +16,13 @@
 | 2026-07-07 | [分桶最小检测](archive/simulation/render_domain/traveluav_author_reply_minimal_check_20260707.md) | `step1_2` 的 raw-vs-AirSim action 输出差异较小（train `0.0539`、`val_seen` `0.0562`），而 `done_only` 的 stop logit 差异很大（`3.7140`、`3.8130`）。因此“所有非首帧均失效”不成立；full 指标恶化主要应解释为 terminal/done stop 崩塌，并叠加场景相关渲染差异。 | 检测复用已有离线输出，不是新闭环实验。 |
 | 2026-07-08 | [深度抽样诊断](archive/simulation/depth/20260708_airsim_depth_da_sample_report.md) | BrushifyCountryRoads 的 `DepthPerspective` 在抽样 front/down 上全部退化为常量 `1.0`；BrushifyUrban 有效样本中 front 相对深度结构相关性较好，down 明显偏弱。 | BCR 深度链路、down-view 相对深度均未解决，DepthAnythingV2 不能视作严格 metric 真值。 |
 | 2026-07-10 | [仿真收敛重构记录](archive/refactor/simulation_refactor_20260710.md) | 将入口、配置、输出和历史证据收敛，保留既有动作/stop/指标语义及 legacy 兼容。 | 代码、运行和结果归档的最终验证以重构记录中的验收表为准。 |
+| 2026-07-13 至 07-16 | [Qwen3-VL-2B 审计](archive/model/qwen/qwen3vl_2b_full_results_and_action_space_review_20260713.md)、[8B 审计](archive/model/qwen/qwen3vl_8b_full_results_and_mainline_review_20260716.md) | 2B/8B 均完成两个 development split 的四条件离线评估；8B 只在 seen 有小幅稳定收益，未在 historical unseen-dev 保持规模收益或稳定双视角增益。 | 单训练 seed、teacher-forced 离线评估；不能形成 HAD/Qwen 正式架构排名或闭环结论。 |
+| 2026-07-20 至 07-25 | [P1-P5 模型阶段总结](model_summary.md) | P1 可观测坐标、P2 公平融合、P3 可靠性、P4 动作分解和 P5 输出接口的 development 评估完成；P2/P3/P4 覆盖 3 seeds。 | 所有 freeze receipt 均为 `test_data_read=false`；historical unseen-dev 不是新测试集，P5 仍为单 seed。 |
 
 ## 当前阶段判断
 
-target-aligned 对离线 `dx/dy` 学习的改善仍然有效，应继续作为动作层结论。控制层修复也有效，但 expert 结果不完整，不能据此宣称闭环上界或最终成功率。当前最强证据把主要瓶颈指向场景相关图像域差异与 terminal/done stop 崩塌，而不是“所有非首帧都失效”或单纯控制 timeout。
+target-aligned 对离线 `dx/dy` 学习的改善仍然有效。后续 P2-P5 进一步表明，复杂门控、动作分解和 VLM 输出接口都存在明确取舍：简单融合可优于旧 HA-DVF，yaw 分解最稳定，而联合可靠性、dz 分解和 action-query 都不能写成全面最优。模型主线的完整口径见 [`reports/model_summary.md`](model_summary.md)。
 
-尚未闭合的三项问题是：`Carla_Town06/val_unseen` 仿真图像与评估、BrushifyCountryRoads 深度输出、down-view 相对深度可靠性。
+控制层修复也有效，但 expert 结果不完整，不能据此宣称闭环上界或最终成功率。当前最强仿真证据把主要瓶颈指向场景相关图像域差异与 terminal/done stop 崩塌，而不是“所有非首帧都失效”或单纯控制 timeout。
+
+尚未闭合的模型问题是冻结后的新场景测试、Qwen 多 seed、独立单视角基线和 AirSim 闭环。仿真侧仍需解决 `Carla_Town06/val_unseen` 图像覆盖、BrushifyCountryRoads 深度输出和 down-view 相对深度可靠性。

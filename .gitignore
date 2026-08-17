@@ -5,9 +5,11 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.ipynb_checkpoints/
 
 # Virtual environments
 .venv/
+.venv-qwen/
 venv/
 env/
 
@@ -23,6 +25,7 @@ data/
 TravelUAVData/
 TravelUAVData
 outputs/
+local_models/
 eval_outputs/
 sim_eval_outputs/
 sim_eval_metadata/
@@ -40,6 +43,7 @@ local_checkpoints/
 *.onnx
 
 # Temporary files
+.tmp/
 .venv-requirements.freeze.txt
 *.tmp
 *.log

@@ -1,11 +1,13 @@
 # 历史报告归档索引
 
-2026-07-10 仿真收敛重构将原 `reports/` 根目录下的 15 份历史报告按主题归档。本次只移动文件，不修改原文；下表同时保存旧路径、新路径和原文件 SHA-256，便于复核引用及内容完整性。
+2026-07-10 仿真收敛重构将原 `reports/` 根目录下的 15 份历史报告按主题归档。2026-08-17 又追加了 3 份 Qwen3-VL 历史指南/审计原文。归档文件不随当前实现改写；下表保存路径与 SHA-256，便于复核引用及内容完整性。
 
 当前结论请优先查看：
 
 - [`reports/project_timeline.md`](../project_timeline.md)
+- [`reports/model_summary.md`](../model_summary.md)
 - [`reports/simulation_summary.md`](../simulation_summary.md)
+- [`docs/model_usage.md`](../../docs/model_usage.md)
 - [`docs/simulation_usage.md`](../../docs/simulation_usage.md)
 
 ## 模型、输入与离线动作实验
@@ -20,6 +22,14 @@
 | `reports/ha_dvf_dz_ablation_result_analysis_20260619.md` | [`reports/archive/model/ha_dvf_dz_ablation_result_analysis_20260619.md`](model/ha_dvf_dz_ablation_result_analysis_20260619.md) | `5208f2698b90a46a7c87f8fd85f741d98f4d16b5b90615d51ec347db39041db8` |
 | `reports/had_dz_yaw_code_and_tuning_review_20260621.md` | [`reports/archive/model/had_dz_yaw_code_and_tuning_review_20260621.md`](model/had_dz_yaw_code_and_tuning_review_20260621.md) | `05ca9d5e4925125b5d56e4ca79f629378ef2bdbf20f79e75ace468c29aa5cb2a` |
 | `reports/ha_dvf_dz_sign_comprehensive_tuning_report_20260622.md` | [`reports/archive/model/ha_dvf_dz_sign_comprehensive_tuning_report_20260622.md`](model/ha_dvf_dz_sign_comprehensive_tuning_report_20260622.md) | `c13130a10e4cbed6fdedab04c28dbef35f8c61dd4d499f25bc11682cc54061db` |
+
+## Qwen3-VL 历史指南与审计
+
+| 归档文件 | SHA-256 |
+| --- | --- |
+| [`QWEN3VL_TRAINING_INFERENCE_GUIDE_20260713.md`](model/qwen/QWEN3VL_TRAINING_INFERENCE_GUIDE_20260713.md) | `16e89897782e263204928bfec1fcdf50d0d51c5deb21dd4acd5308a5c9c8f146` |
+| [`qwen3vl_2b_full_results_and_action_space_review_20260713.md`](model/qwen/qwen3vl_2b_full_results_and_action_space_review_20260713.md) | `29d335645f9b30ec41b2671936150f6a807050aed4b550082e913c5296506184` |
+| [`qwen3vl_8b_full_results_and_mainline_review_20260716.md`](model/qwen/qwen3vl_8b_full_results_and_mainline_review_20260716.md) | `145c6b8544fae3af146eb4f4bfaa30861c1a2d02209af06ea4ddb4e06e6f4227` |
 
 ## 仿真控制历史
 
@@ -45,4 +55,4 @@
 
 ## 引用规则
 
-历史报告记录当时的代码、路径和中间结论，原文不随当前实现更新。需要判断当前状态时，以活动总结为入口，再回到上表所列原始证据；不要把 2026-06-26 的 expert 中途快照当作完整训练集结果，也不要把缺少 `Carla_Town06` 图像的 2026-07-04 评估描述成完整 `val_unseen` 评估。
+历史报告记录当时的代码、路径和中间结论，原文不随当前实现更新。需要判断当前状态时，以活动总结为入口，再回到上表所列原始证据；不要把 2026-06-26 的 expert 中途快照当作完整训练集结果，也不要把缺少 `Carla_Town06` 图像的 2026-07-04 评估描述成完整 `val_unseen` 评估。P1-P5 的 `val_unseen` 已参与历史开发，应称 historical unseen-dev；所有离线结果都不能替代一次性新 test 或闭环 SR/SPL。

@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# DEPRECATED compatibility wrapper for historical single-scene legacy output.
+# Reproduction example:
+#   scripts/simulation/run_traveluav_closed_loop_eval.sh \
+#     --scene BrushifyCountryRoads --trajectory-id TRAJECTORY_ID --dry-run
+# New work should use: scripts/simulation/run_eval.sh --scene NAME --trajectory-id ID
+# Historical flags and underscore aliases are forwarded to the legacy profile.
+
 echo "[DEPRECATED] Use scripts/simulation/run_eval.sh; selecting legacy output." >&2
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON_BIN="${PYTHON:-${REPO_ROOT}/.venv/bin/python}"

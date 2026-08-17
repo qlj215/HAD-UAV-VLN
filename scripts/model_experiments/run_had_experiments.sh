@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Purpose: run the eight main HAD model/baseline experiments and evaluate them.
+# Full run:
+#   bash scripts/model_experiments/run_had_experiments.sh
+# Recommended quick smoke (one experiment, one epoch):
+#   QUICK=1 EXPERIMENTS=ha_dvf bash scripts/model_experiments/run_had_experiments.sh
+# Inspect generated commands without training:
+#   QUICK=1 EXPERIMENTS=ha_dvf DRY_RUN=1 bash scripts/model_experiments/run_had_experiments.sh
+# Common overrides: DATA_DIR, RUN_DIR, EXPERIMENTS, EPOCHS, CUDA_VISIBLE_DEVICES.
+# This script takes no positional arguments; use environment variables above.
+
+usage() {
+  awk 'NR >= 4 && /^#/ { sub(/^# ?/, ""); print; next } NR >= 4 { exit }' "$0"
+}
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 

@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# DEPRECATED compatibility wrapper that loops over historical splits.
+# Reproduction-only dry run:
+#   scripts/simulation/run_traveluav_closed_loop_all_splits.sh \
+#     --splits val_seen,val_unseen --skip-sync --dry-run
+# New work should invoke scripts/simulation/run_eval.sh once for each required split.
+# This wrapper may sync metadata unless --skip-sync is supplied.
+
 echo "[DEPRECATED] Run scripts/simulation/run_eval.sh once per split; selecting legacy output." >&2
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPLITS_RAW="train,val_seen,val_unseen,test"

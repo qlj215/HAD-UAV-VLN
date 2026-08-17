@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Purpose: test smaller batches around the selected HA-DVF dz-sign setting.
+# Full run (12 configurations):
+#   bash scripts/model_experiments/run_ha_dvf_dz_sign_small_batch_tuning.sh
+# Recommended quick smoke (one named configuration, one epoch):
+#   QUICK=1 EXPERIMENTS=bs32_lr5e-5_beta0.5_sign0.2_dzw3 bash scripts/model_experiments/run_ha_dvf_dz_sign_small_batch_tuning.sh
+# Inspect generated commands without training: add DRY_RUN=1 to the command above.
+# Common overrides: DATA_DIR, RUN_DIR, EXPERIMENTS, EPOCHS, SPLITS, CUDA_VISIBLE_DEVICES.
+# This script takes no positional arguments; use environment variables above.
+
+usage() {
+  awk 'NR >= 4 && /^#/ { sub(/^# ?/, ""); print; next } NR >= 4 { exit }' "$0"
+}
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 

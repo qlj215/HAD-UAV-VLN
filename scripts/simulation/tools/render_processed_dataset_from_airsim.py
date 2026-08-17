@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Render HAD processed front/down images from exact TravelUAV world poses."""
+"""Render processed front/down images from exact TravelUAV world poses.
+
+Use the shell wrapper, which supplies host paths, output naming, disk checks,
+and optional background logging::
+
+    scripts/simulation/tools/run_render_airsim_processed_dataset.sh \
+      --scene BrushifyCountryRoads --limit-samples 1 --dry-run
+
+Remove ``--dry-run`` only after checking the resolved sample set. Direct Python
+usage is intended for advanced overrides; run this file with ``--help`` first.
+"""
 from __future__ import annotations
 
 import argparse

@@ -2,6 +2,15 @@
 """
 Validate initial-input consistency between TravelUAV training samples and AirSim.
 
+Recommended wrapper from the repository root::
+
+  scripts/simulation/diagnostics/run_traveluav_initial_input_consistency.sh \
+    --scene BrushifyCountryRoads --num-trajectories 1
+
+Add ``--metadata-only`` for a fast check that does not connect to AirSim. Call
+this Python file directly only when the wrapper does not expose a needed
+diagnostic option.
+
 For each selected trajectory this script:
   1. reads the target-aligned processed JSONL step-0 sample,
   2. resets AirSim to the raw TravelUAV start pose used by closed-loop eval,

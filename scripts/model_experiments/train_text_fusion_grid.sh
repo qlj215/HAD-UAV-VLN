@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Purpose: run the 3x3 text-encoder x fusion-type training grid.
+# Full run:
+#   bash scripts/model_experiments/train_text_fusion_grid.sh
+# Recommended first check (print all nine commands, do not train):
+#   DRY_RUN=1 bash scripts/model_experiments/train_text_fusion_grid.sh
+# Common overrides: DATA_CONFIG, BASE_MODEL_CONFIG, BASE_TRAIN_CONFIG,
+# OUTPUT_ROOT, TMP_DIR, PYTHON_BIN, and DRY_RUN.
+# This script takes no positional arguments; use environment variables above.
+
+usage() {
+  awk 'NR >= 4 && /^#/ { sub(/^# ?/, ""); print; next } NR >= 4 { exit }' "$0"
+}
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 

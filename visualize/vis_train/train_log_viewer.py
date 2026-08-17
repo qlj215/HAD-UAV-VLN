@@ -1,3 +1,11 @@
+"""Browse HAD training runs in Streamlit.
+
+From the repository root::
+
+    streamlit run visualize/vis_train/train_log_viewer.py \
+      --server.port 8501 -- /path/to/run_dir_or_outputs_root
+"""
+
 # train_run_viewer.py
 # ------------------------------------------------------------
 # HAD-UAV-VLN training run visualization dashboard
@@ -13,7 +21,7 @@
 #   pip install streamlit plotly pandas
 #
 # Run:
-#   streamlit run vis_train/train_log_viewer.py --server.address 0.0.0.0 --server.port 8501 -- /path/to/run_dir_or_outputs_root
+#   streamlit run visualize/vis_train/train_log_viewer.py --server.address 0.0.0.0 --server.port 8501 -- /path/to/run_dir_or_outputs_root
 # ------------------------------------------------------------
 
 import json

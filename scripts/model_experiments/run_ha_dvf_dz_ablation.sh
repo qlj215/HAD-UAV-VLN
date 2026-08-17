@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Purpose: compare the three HA-DVF dz-loss alternatives on target-aligned data.
+# Full run:
+#   bash scripts/model_experiments/run_ha_dvf_dz_ablation.sh
+# Recommended quick smoke (one variant, one epoch):
+#   QUICK=1 EXPERIMENTS=ha_dvf_dz_sign_aux bash scripts/model_experiments/run_ha_dvf_dz_ablation.sh
+# Inspect generated commands without training:
+#   QUICK=1 EXPERIMENTS=ha_dvf_dz_sign_aux DRY_RUN=1 bash scripts/model_experiments/run_ha_dvf_dz_ablation.sh
+# Common overrides: DATA_DIR, RUN_DIR, EXPERIMENTS, EPOCHS, CUDA_VISIBLE_DEVICES.
+# This script takes no positional arguments; use environment variables above.
+
+usage() {
+  awk 'NR >= 4 && /^#/ { sub(/^# ?/, ""); print; next } NR >= 4 { exit }' "$0"
+}
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 

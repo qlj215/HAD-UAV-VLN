@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# DEPRECATED compatibility wrapper for one historical split with legacy output.
+# Reproduction example:
+#   scripts/simulation/run_traveluav_closed_loop_split.sh --split val_seen --dry-run
+# New work should use: scripts/simulation/run_eval.sh --split val_seen
+# Historical scene/filter flags are translated and forwarded to the legacy profile.
+
 echo "[DEPRECATED] Use scripts/simulation/run_eval.sh --split NAME; selecting legacy output." >&2
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON_BIN="${PYTHON:-${REPO_ROOT}/.venv/bin/python}"

@@ -1,3 +1,11 @@
+"""Browse a processed HAD dataset in Streamlit.
+
+From the repository root::
+
+    streamlit run visualize/vis_data/processed_dataset_viewer.py \
+      --server.port 8500 -- /path/to/processed_dataset
+"""
+
 # processed_dataset_viewer.py
 # ------------------------------------------------------------
 # 处理后 HAD-UAV-VLN 数据集可视化网页
@@ -17,11 +25,11 @@
 #   pip install streamlit plotly pandas pillow
 #
 # 运行：
-#   streamlit run vis_data/processed_dataset_viewer.py --server.address 0.0.0.0 --server.port 8500 -- /path/to/A
+#   streamlit run visualize/vis_data/processed_dataset_viewer.py --server.address 0.0.0.0 --server.port 8500 -- /path/to/A
 #
 # 本地浏览器访问服务器网页：
-#   ssh -L 8501:127.0.0.1:8501 user@host -p PORT
-#   浏览器打开 http://127.0.0.1:8501
+#   ssh -L 8500:127.0.0.1:8500 user@host -p PORT
+#   浏览器打开 http://127.0.0.1:8500
 # ------------------------------------------------------------
 
 import json

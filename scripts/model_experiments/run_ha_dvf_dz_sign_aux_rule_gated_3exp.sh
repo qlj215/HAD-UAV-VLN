@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Purpose: run the three focused rule-gated HA-DVF dz-sign confirmation trials.
+# Full run:
+#   bash scripts/model_experiments/run_ha_dvf_dz_sign_aux_rule_gated_3exp.sh
+# Recommended quick smoke (one named configuration, one epoch):
+#   QUICK=1 EXPERIMENTS=lr5e-5_bs96_beta0.5_sign0.2_dzw3_ep15 bash scripts/model_experiments/run_ha_dvf_dz_sign_aux_rule_gated_3exp.sh
+# Inspect generated commands without training: add DRY_RUN=1 to the command above.
+# Common overrides: DATA_DIR, RUN_DIR, EXPERIMENTS, EPOCHS, SPLITS, CUDA_VISIBLE_DEVICES.
+# This script takes no positional arguments; use environment variables above.
+
+usage() {
+  awk 'NR >= 4 && /^#/ { sub(/^# ?/, ""); print; next } NR >= 4 { exit }' "$0"
+}
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 

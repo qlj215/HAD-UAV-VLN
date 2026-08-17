@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Purpose: compare yaw reweighting, first-step yaw head, and rule-gated expert.
+# Full run:
+#   bash scripts/model_experiments/run_ha_dvf_yaw_ablation.sh
+# Recommended quick command (one epoch for all three variants):
+#   QUICK=1 bash scripts/model_experiments/run_ha_dvf_yaw_ablation.sh
+# Inspect generated commands without training:
+#   QUICK=1 DRY_RUN=1 bash scripts/model_experiments/run_ha_dvf_yaw_ablation.sh
+# Common overrides: DATA_DIR, RUN_DIR, EPOCHS, SPLITS, CUDA_VISIBLE_DEVICES.
+# This script takes no positional arguments; use environment variables above.
+
+usage() {
+  awk 'NR >= 4 && /^#/ { sub(/^# ?/, ""); print; next } NR >= 4 { exit }' "$0"
+}
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 
