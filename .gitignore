@@ -25,6 +25,7 @@ TravelUAVData
 outputs/
 eval_outputs/
 sim_eval_outputs/
+sim_eval_metadata/
 runs/
 wandb/
 logs/

@@ -1,0 +1,83 @@
+version: 1
+
+# Resolution order is: explicit CLI > selected profile > common > checkpoint
+# metadata (model-bound fields only) > code safety defaults.
+common:
+  checkpoint: local_checkpoints/lr5e-5_bs96_beta0.5_sign0.2_dzw3_ep15/best_model.pth
+  vocab_path: local_checkpoints/lr5e-5_bs96_beta0.5_sign0.2_dzw3_ep15/vocab.json
+  traveluav_root: $HOME/h3c_pro/TravelUAV
+  env_root: $HOME/TravelUAV_envs
+  raw_data_dir: $HOME/datasets/TravelUAVData
+  metadata_dir: sim_eval_metadata/TravelUAVProcessedData_target_aligned
+  output_root: sim_eval_outputs
+  scene: null
+  split: null
+  scene_filters: null
+  trajectory_ids: null
+  num_trajectories: 1
+  start_index: 0
+  action_source: model
+  device: auto
+  image_size: [224, 224]
+  max_inst_len: 80
+  uav_position_scale: 100.0
+  success_threshold: 20.0
+  stop_threshold: 0.3
+  movement_mode: teleport
+  teleport_settle_frames: 5
+  teleport_rpc_timeout_s: 5.0
+  velocity: 1.0
+  drivetrain: max_degree_of_freedom
+  waypoint_count: 5
+  move_timeout_s: 5.0
+  move_timeout_scale: 1.5
+  move_timeout_margin_s: 3.0
+  move_timeout_yaw_rate_deg_s: 45.0
+  move_timeout_max_s: 30.0
+  move_endpoint_tolerance: 1.0
+  hover_rpc_timeout_s: 5.0
+  hover_settle_timeout_s: 2.0
+  hover_speed_threshold: 0.25
+  hover_retry_count: 2
+  server_ip: 127.0.0.1
+  server_port: 30000
+  gpu_id: 0
+  airsim_timeout: 240.0
+  scene_wait_s: 45.0
+  start_server: true
+  server_wait_s: 120.0
+  clock_speed: 1.0
+  keep_server: false
+  front_camera: FrontCamera
+  down_camera: DownCamera
+  image_channel_mode: opencv_bgr_compat
+  record_image_stride: 1
+  record_image_width: 384
+  record_image_format: jpg
+  record_image_quality: 80
+  airsim_recording_camera: FrontCamera
+  airsim_recording_interval: 0.1
+  airsim_recording_fps: 10.0
+  airsim_recording_keep_frames: false
+  spawn_target: false
+  require_target_spawn: false
+
+profiles:
+  eval:
+    output_format: minimal
+    max_steps: 200
+    num_trajectories: 0
+    record_images: false
+    airsim_recording: false
+  debug:
+    output_format: debug
+    max_steps: 5
+    num_trajectories: 1
+    record_images: true
+    airsim_recording: false
+  legacy:
+    output_format: legacy
+    max_steps: 200
+    num_trajectories: 1
+    record_images: false
+    airsim_recording: false

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 
 if [[ -n "${PYTHON_BIN:-}" ]]; then
@@ -30,7 +30,7 @@ else
 fi
 
 OUTPUT_BASE="${OUTPUT_BASE:-/root/autodl-tmp/HAD_UAV_VLN_experiments}"
-RUN_GROUP="${RUN_GROUP:-ha_dvf_yaw_ablation_$(date +%Y%m%d_%H%M%S)}"
+RUN_GROUP="${RUN_GROUP:-ha_dvf_dz_ablation_$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="${RUN_DIR:-${OUTPUT_BASE}/${RUN_GROUP}}"
 CONFIG_DIR="${RUN_DIR}/generated_configs"
 PROGRESS_LOG="${PROGRESS_LOG:-${RUN_DIR}/progress_log.tsv}"
@@ -47,6 +47,8 @@ MAX_INST_LEN="${MAX_INST_LEN:-80}"
 VOCAB_SIZE="${VOCAB_SIZE:-6000}"
 VISION_BACKBONE="${VISION_BACKBONE:-resnet50}"
 SPLITS="${SPLITS:-train val_seen val_unseen test}"
+EXPERIMENTS_FILTER=" ${EXPERIMENTS:-} "
+EXPERIMENTS_FILTER=" ${EXPERIMENTS_FILTER//,/ } "
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -55,13 +57,21 @@ mkdir -p "${RUN_DIR}" "${CONFIG_DIR}"
 if [[ ! -f "${PROGRESS_LOG}" ]]; then
   printf "time\tstage\texperiment\tdetail\n" > "${PROGRESS_LOG}"
 fi
-ln -sfn "${RUN_DIR}" "${OUTPUT_BASE}/latest_yaw_ablation"
+ln -sfn "${RUN_DIR}" "${OUTPUT_BASE}/latest_dz_ablation"
 
 log_event() {
   local stage="$1"
   local exp="$2"
   local detail="$3"
   printf "%s\t%s\t%s\t%s\n" "$(date '+%F %T')" "${stage}" "${exp}" "${detail}" | tee -a "${PROGRESS_LOG}"
+}
+
+selected() {
+  local exp="$1"
+  if [[ -z "${EXPERIMENTS:-}" ]]; then
+    return 0
+  fi
+  [[ "${EXPERIMENTS_FILTER}" == *" ${exp} "* ]]
 }
 
 line_count() {
@@ -75,8 +85,7 @@ line_count() {
 
 generate_configs() {
   local exp="$1"
-  local policy_yaw_strategy="$2"
-  local yaw_loss_mode="$3"
+  local dz_mode="$2"
   local model_config="${CONFIG_DIR}/${exp}_model.yaml"
   local train_config="${CONFIG_DIR}/${exp}_train.yaml"
   local data_config="${CONFIG_DIR}/${exp}_data.yaml"
@@ -85,7 +94,7 @@ generate_configs() {
   "${PYTHON_CMD[@]}" - \
     "${BASE_DATA_CONFIG}" "${BASE_MODEL_CONFIG}" "${BASE_TRAIN_CONFIG}" "${BASE_EVAL_CONFIG}" \
     "${data_config}" "${model_config}" "${train_config}" "${eval_config}" \
-    "${DATA_DIR}" "${RUN_DIR}/${exp}" "${exp}" "${policy_yaw_strategy}" "${yaw_loss_mode}" \
+    "${DATA_DIR}" "${RUN_DIR}/${exp}" "${exp}" "${dz_mode}" \
     "${EPOCHS}" "${TRAIN_BATCH_SIZE}" "${EVAL_BATCH_SIZE}" "${NUM_WORKERS}" \
     "${LR}" "${WEIGHT_DECAY}" "${IMAGE_SIZE}" "${MAX_INST_LEN}" "${VOCAB_SIZE}" "${VISION_BACKBONE}" <<'PY'
 import sys
@@ -95,7 +104,7 @@ import yaml
 (
     base_data, base_model, base_train, base_eval,
     out_data, out_model, out_train, out_eval,
-    data_dir, exp_dir, exp_name, policy_yaw_strategy, yaw_loss_mode,
+    data_dir, exp_dir, exp_name, dz_mode,
     epochs, train_batch, eval_batch, workers,
     lr, weight_decay, image_size, max_inst_len, vocab_size, backbone,
 ) = sys.argv[1:]
@@ -128,6 +137,7 @@ data.setdefault("instruction", {})["max_length"] = int(max_inst_len)
 data.setdefault("instruction", {})["vocab_size"] = int(vocab_size)
 data.setdefault("instruction", {})["vocab_path"] = str(Path(data_dir) / "vocab.json")
 
+# Fixed HA-DVF rule-gated yaw expert baseline. Do not change dyaw settings here.
 model["name"] = "HAD_VLN_POSITION"
 model.setdefault("vision", {}).update({
     "backbone": backbone,
@@ -171,16 +181,20 @@ model["fusion"].pop("fixed_gate_alpha", None)
 model.setdefault("policy_head", {}).update({
     "hidden_dims": [512, 256],
     "dropout": 0.3,
-    "yaw_strategy": policy_yaw_strategy,
+    "yaw_strategy": "rule_gated_expert",
 })
-model.setdefault("auxiliary_tasks", {})["progress_monitor"] = False
+aux = model.setdefault("auxiliary_tasks", {})
+aux["progress_monitor"] = False
+aux["dz_sign_aux"] = dz_mode == "sign_aux"
+aux["dz_sign_hidden_dim"] = 128
 model["ablation"] = {
     "experiment_name": exp_name,
     "vision_mode": "dual",
     "use_height": True,
     "use_language": True,
     "use_position": True,
-    "yaw_ablation": yaw_loss_mode,
+    "yaw_ablation": "rule_gated_expert",
+    "dz_ablation": dz_mode,
 }
 
 n_epochs = int(epochs)
@@ -209,38 +223,61 @@ loss.update({
     "action_weight": 1.0,
     "stop_weight": 0.5,
     "progress_weight": 0.1,
-})
-if yaw_loss_mode == "reweight":
-    loss["yaw"] = {
-        "mode": "reweight",
-        "type": "smooth_l1",
-        "smooth_l1_beta": 1.0,
-        "wrap_error": True,
-        "init_extra_weight": 5.0,
-        "mag_alpha": 1.0,
-        "yaw_max": 3.141592653589793,
-        "normalize_by_weight_sum": False,
-    }
-elif yaw_loss_mode == "first_step_head":
-    loss["yaw"] = {
-        "mode": "first_step_head",
-        "type": "smooth_l1",
-        "smooth_l1_beta": 1.0,
-        "wrap_error": True,
-        "init_weight": 3.0,
-        "normal_weight": 1.0,
-    }
-elif yaw_loss_mode == "rule_gated_expert":
-    loss["yaw"] = {
+    "yaw": {
         "mode": "rule_gated_expert",
         "type": "smooth_l1",
         "smooth_l1_beta": 1.0,
         "wrap_error": True,
         "init_weight": 3.0,
         "normal_weight": 1.0,
+    },
+})
+loss.pop("dz_sign", None)
+if dz_mode == "weighted_smoothl1":
+    loss["dz"] = {
+        "enabled": True,
+        "mode": "weighted_smoothl1",
+        "type": "smooth_l1",
+        "smooth_l1_beta": 0.5,
+        "weight": 3.0,
+        "normalize_dim_weights": True,
+        "mag_alpha": 0.0,
+        "mag_scale": 0.75,
+        "normalize_by_weight_sum": True,
+    }
+elif dz_mode == "longtail_reweight":
+    loss["dz"] = {
+        "enabled": True,
+        "mode": "longtail_reweight",
+        "type": "smooth_l1",
+        "smooth_l1_beta": 0.5,
+        "weight": 2.0,
+        "normalize_dim_weights": True,
+        "mag_alpha": 3.0,
+        "mag_scale": 0.75,
+        "max_sample_weight": 5.0,
+        "normalize_by_weight_sum": True,
+    }
+elif dz_mode == "sign_aux":
+    loss["dz"] = {
+        "enabled": True,
+        "mode": "weighted_smoothl1",
+        "type": "smooth_l1",
+        "smooth_l1_beta": 0.5,
+        "weight": 3.0,
+        "normalize_dim_weights": True,
+        "mag_alpha": 0.0,
+        "mag_scale": 0.75,
+        "normalize_by_weight_sum": True,
+    }
+    loss["dz_sign"] = {
+        "enabled": True,
+        "threshold": 0.25,
+        "weight": 0.2,
+        "class_weights": [2.0, 1.0, 2.0],
     }
 else:
-    raise ValueError(f"Unsupported yaw_loss_mode: {yaw_loss_mode}")
+    raise ValueError(f"Unsupported dz_mode: {dz_mode}")
 
 train.setdefault("gradient_clip", {}).update({"enable": True, "max_norm": 5.0})
 train.setdefault("logging", {}).update({
@@ -285,8 +322,12 @@ PY
 
 run_experiment() {
   local exp="$1"
-  local policy_yaw_strategy="$2"
-  local yaw_loss_mode="$3"
+  local dz_mode="$2"
+
+  if ! selected "${exp}"; then
+    log_event "SKIP_EXPERIMENT" "${exp}" "filtered by EXPERIMENTS=${EXPERIMENTS:-}"
+    return
+  fi
 
   local exp_dir="${RUN_DIR}/${exp}"
   local data_config="${CONFIG_DIR}/${exp}_data.yaml"
@@ -294,8 +335,8 @@ run_experiment() {
   local train_config="${CONFIG_DIR}/${exp}_train.yaml"
   local eval_config="${CONFIG_DIR}/${exp}_eval.yaml"
   mkdir -p "${exp_dir}"
-  generate_configs "${exp}" "${policy_yaw_strategy}" "${yaw_loss_mode}"
-  log_event "CONFIG" "${exp}" "generated configs in ${CONFIG_DIR}"
+  generate_configs "${exp}" "${dz_mode}"
+  log_event "CONFIG" "${exp}" "dz_mode=${dz_mode}; configs=${CONFIG_DIR}"
 
   if [[ -f "${exp_dir}/.train_done" ]]; then
     log_event "SKIP_TRAIN" "${exp}" "train done marker exists"
@@ -374,11 +415,11 @@ run_experiment() {
   done
 }
 
-log_event "START" "all" "run_dir=${RUN_DIR}; data_dir=${DATA_DIR}; epochs=${EPOCHS}; train_batch=${TRAIN_BATCH_SIZE}; eval_batch=${EVAL_BATCH_SIZE}"
+log_event "START" "all" "run_dir=${RUN_DIR}; data_dir=${DATA_DIR}; epochs=${EPOCHS}; train_batch=${TRAIN_BATCH_SIZE}; eval_batch=${EVAL_BATCH_SIZE}; baseline=ha_dvf_rule_gated_expert"
 
-run_experiment "ha_dvf_yaw_reweight" "baseline" "reweight"
-run_experiment "ha_dvf_first_step_head" "first_step_head" "first_step_head"
-run_experiment "ha_dvf_rule_gated_expert" "rule_gated_expert" "rule_gated_expert"
+run_experiment "ha_dvf_dz_weighted_smoothl1" "weighted_smoothl1"
+run_experiment "ha_dvf_dz_longtail_reweight" "longtail_reweight"
+run_experiment "ha_dvf_dz_sign_aux" "sign_aux"
 
 log_event "DONE" "all" "run_dir=${RUN_DIR}"
 echo "Run directory: ${RUN_DIR}"

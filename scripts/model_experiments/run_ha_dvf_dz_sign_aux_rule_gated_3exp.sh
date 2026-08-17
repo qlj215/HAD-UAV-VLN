@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 
 if [[ -n "${PYTHON_BIN:-}" ]]; then
@@ -24,29 +24,27 @@ BASE_EVAL_CONFIG="${BASE_EVAL_CONFIG:-configs/eval.yaml}"
 if [[ "${QUICK:-0}" == "1" ]]; then
   DATA_DIR="${DATA_DIR:-/root/autodl-tmp/TravelUAVProcessedData_mini}"
   EPOCHS="${EPOCHS:-1}"
-  RUN_GROUP="${RUN_GROUP:-quick_yaw_posxyz_$(date +%Y%m%d_%H%M%S)}"
 else
   DATA_DIR="${DATA_DIR:-/root/autodl-tmp/TravelUAVProcessedData_target_aligned}"
-  EPOCHS="${EPOCHS:-30}"
-  RUN_GROUP="${RUN_GROUP:-had_yaw_posxyz_experiments_$(date +%Y%m%d_%H%M%S)}"
+  EPOCHS="${EPOCHS:-15}"
 fi
 
 OUTPUT_BASE="${OUTPUT_BASE:-/root/autodl-tmp/HAD_UAV_VLN_experiments}"
+RUN_GROUP="${RUN_GROUP:-ha_dvf_dz_sign_aux_rule_gated_3exp_$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="${RUN_DIR:-${OUTPUT_BASE}/${RUN_GROUP}}"
 CONFIG_DIR="${RUN_DIR}/generated_configs"
 PROGRESS_LOG="${PROGRESS_LOG:-${RUN_DIR}/progress_log.tsv}"
 DRY_RUN="${DRY_RUN:-0}"
 DEVICE="${DEVICE:-auto}"
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-192}"
+
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-512}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
-LR="${LR:-1.0e-4}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1.0e-4}"
 IMAGE_SIZE="${IMAGE_SIZE:-224}"
 MAX_INST_LEN="${MAX_INST_LEN:-80}"
 VOCAB_SIZE="${VOCAB_SIZE:-6000}"
 VISION_BACKBONE="${VISION_BACKBONE:-resnet50}"
-SPLITS="${SPLITS:-train val_seen val_unseen test}"
+SPLITS="${SPLITS:-val_seen val_unseen}"
 EXPERIMENTS_FILTER=" ${EXPERIMENTS:-} "
 EXPERIMENTS_FILTER=" ${EXPERIMENTS_FILTER//,/ } "
 
@@ -57,7 +55,7 @@ mkdir -p "${RUN_DIR}" "${CONFIG_DIR}"
 if [[ ! -f "${PROGRESS_LOG}" ]]; then
   printf "time\tstage\texperiment\tdetail\n" > "${PROGRESS_LOG}"
 fi
-ln -sfn "${RUN_DIR}" "${OUTPUT_BASE}/latest"
+ln -sfn "${RUN_DIR}" "${OUTPUT_BASE}/latest_dz_sign_aux_rule_gated_3exp"
 
 log_event() {
   local stage="$1"
@@ -85,11 +83,11 @@ line_count() {
 
 generate_configs() {
   local exp="$1"
-  local vision_mode="$2"
-  local fusion_type="$3"
-  local use_height="$4"
-  local use_language="$5"
-  local fixed_gate_alpha="$6"
+  local lr="$2"
+  local train_batch="$3"
+  local dz_beta="$4"
+  local sign_weight="$5"
+  local dz_weight="$6"
   local model_config="${CONFIG_DIR}/${exp}_model.yaml"
   local train_config="${CONFIG_DIR}/${exp}_train.yaml"
   local data_config="${CONFIG_DIR}/${exp}_data.yaml"
@@ -98,10 +96,10 @@ generate_configs() {
   "${PYTHON_CMD[@]}" - \
     "${BASE_DATA_CONFIG}" "${BASE_MODEL_CONFIG}" "${BASE_TRAIN_CONFIG}" "${BASE_EVAL_CONFIG}" \
     "${data_config}" "${model_config}" "${train_config}" "${eval_config}" \
-    "${DATA_DIR}" "${RUN_DIR}/${exp}" "${exp}" "${vision_mode}" "${fusion_type}" \
-    "${use_height}" "${use_language}" "${fixed_gate_alpha}" \
-    "${EPOCHS}" "${TRAIN_BATCH_SIZE}" "${EVAL_BATCH_SIZE}" "${NUM_WORKERS}" \
-    "${LR}" "${WEIGHT_DECAY}" "${IMAGE_SIZE}" "${MAX_INST_LEN}" "${VOCAB_SIZE}" "${VISION_BACKBONE}" <<'PY'
+    "${DATA_DIR}" "${RUN_DIR}/${exp}" "${exp}" \
+    "${EPOCHS}" "${train_batch}" "${EVAL_BATCH_SIZE}" "${NUM_WORKERS}" \
+    "${lr}" "${WEIGHT_DECAY}" "${IMAGE_SIZE}" "${MAX_INST_LEN}" "${VOCAB_SIZE}" "${VISION_BACKBONE}" \
+    "${dz_beta}" "${sign_weight}" "${dz_weight}" <<'PY'
 import sys
 from pathlib import Path
 import yaml
@@ -109,10 +107,10 @@ import yaml
 (
     base_data, base_model, base_train, base_eval,
     out_data, out_model, out_train, out_eval,
-    data_dir, exp_dir, exp_name, vision_mode, fusion_type,
-    use_height, use_language, fixed_gate_alpha,
+    data_dir, exp_dir, exp_name,
     epochs, train_batch, eval_batch, workers,
     lr, weight_decay, image_size, max_inst_len, vocab_size, backbone,
+    dz_beta, sign_weight, dz_weight,
 ) = sys.argv[1:]
 
 def load(path):
@@ -141,9 +139,9 @@ data.setdefault("image", {})["normalization"] = {
 }
 data.setdefault("instruction", {})["max_length"] = int(max_inst_len)
 data.setdefault("instruction", {})["vocab_size"] = int(vocab_size)
-vocab_path = Path(data_dir) / "vocab.json"
-data.setdefault("instruction", {})["vocab_path"] = str(vocab_path)
+data.setdefault("instruction", {})["vocab_path"] = str(Path(data_dir) / "vocab.json")
 
+# Fixed HA-DVF policy: dual-view + height-conditioned fusion + position input.
 model["name"] = "HAD_VLN_POSITION"
 model.setdefault("vision", {}).update({
     "backbone": backbone,
@@ -163,6 +161,7 @@ model.setdefault("language", {}).update({
     "dropout": 0.3,
 })
 model.setdefault("height", {}).update({
+    "enabled": True,
     "hidden_dim": 64,
     "min_alt": 0.0,
     "max_alt": 200.0,
@@ -177,23 +176,36 @@ model.setdefault("position", {}).update({
     "dropout": 0.1,
 })
 model.setdefault("fusion", {}).update({
-    "fusion_type": fusion_type,
+    "fusion_type": "height_cond",
     "hidden_dim": 512,
     "num_heads": 8,
     "dropout": 0.2,
 })
-if fixed_gate_alpha.lower() in {"none", "null", ""}:
-    model["fusion"].pop("fixed_gate_alpha", None)
-else:
-    model["fusion"]["fixed_gate_alpha"] = float(fixed_gate_alpha)
-model.setdefault("policy_head", {}).update({"hidden_dims": [512, 256], "dropout": 0.3})
-model.setdefault("auxiliary_tasks", {})["progress_monitor"] = False
+model["fusion"].pop("fixed_gate_alpha", None)
+model.setdefault("policy_head", {}).update({
+    "hidden_dims": [512, 256],
+    "dropout": 0.3,
+    "yaw_strategy": "rule_gated_expert",
+})
+aux = model.setdefault("auxiliary_tasks", {})
+aux["progress_monitor"] = False
+aux["dz_sign_aux"] = True
+aux["dz_sign_hidden_dim"] = 128
 model["ablation"] = {
     "experiment_name": exp_name,
-    "vision_mode": vision_mode,
-    "use_height": use_height.lower() == "true",
-    "use_language": use_language.lower() == "true",
+    "vision_mode": "dual",
+    "use_height": True,
+    "use_language": True,
     "use_position": True,
+    "yaw_ablation": "rule_gated_expert",
+    "dz_ablation": "sign_aux",
+    "tuning": {
+        "learning_rate": float(lr),
+        "batch_size": int(train_batch),
+        "dz_smooth_l1_beta": float(dz_beta),
+        "dz_sign_weight": float(sign_weight),
+        "dz_loss_weight": float(dz_weight),
+    },
 }
 
 n_epochs = int(epochs)
@@ -212,15 +224,41 @@ train.setdefault("optimizer", {}).update({
 })
 train.setdefault("lr_scheduler", {}).update({
     "type": "cosine",
-    "warmup_epochs": min(3, max(n_epochs - 1, 0)),
+    "warmup_epochs": min(2, max(n_epochs - 1, 0)),
     "min_lr": 1.0e-6,
     "step_size": 10,
     "gamma": 0.1,
 })
-train.setdefault("loss", {}).update({
+loss = train.setdefault("loss", {})
+loss.update({
     "action_weight": 1.0,
     "stop_weight": 0.5,
     "progress_weight": 0.1,
+    "yaw": {
+        "mode": "rule_gated_expert",
+        "type": "smooth_l1",
+        "smooth_l1_beta": 1.0,
+        "wrap_error": True,
+        "init_weight": 3.0,
+        "normal_weight": 1.0,
+    },
+    "dz": {
+        "enabled": True,
+        "mode": "weighted_smoothl1",
+        "type": "smooth_l1",
+        "smooth_l1_beta": float(dz_beta),
+        "weight": float(dz_weight),
+        "normalize_dim_weights": True,
+        "mag_alpha": 0.0,
+        "mag_scale": 0.75,
+        "normalize_by_weight_sum": True,
+    },
+    "dz_sign": {
+        "enabled": True,
+        "threshold": 0.25,
+        "weight": float(sign_weight),
+        "class_weights": [2.0, 1.0, 2.0],
+    },
 })
 train.setdefault("gradient_clip", {}).update({"enable": True, "max_norm": 5.0})
 train.setdefault("logging", {}).update({
@@ -228,7 +266,11 @@ train.setdefault("logging", {}).update({
     "eval_interval": 1,
     "save_interval": n_epochs + 1,
 })
-train.setdefault("output", {}).update({"root_dir": str(Path(exp_dir).parent), "run_name": Path(exp_dir).name, "dir": None})
+train.setdefault("output", {}).update({
+    "root_dir": str(Path(exp_dir).parent),
+    "run_name": Path(exp_dir).name,
+    "dir": None,
+})
 
 eval_section.update({
     "batch_size": int(eval_batch),
@@ -239,10 +281,20 @@ eval_section.update({
     "max_inst_len": int(max_inst_len),
     "splits": ["train", "val_seen", "val_unseen", "test"],
 })
-eval_section.setdefault("trajectory", {}).update({"success_threshold": 20.0, "max_steps": 200})
-eval_section.setdefault("output", {}).update({"root_dir": str(Path(exp_dir) / "results")})
+eval_section.setdefault("trajectory", {}).update({
+    "success_threshold": 20.0,
+    "max_steps": 200,
+})
+eval_section.setdefault("output", {}).update({
+    "root_dir": str(Path(exp_dir) / "results"),
+})
 
-for path, cfg in [(out_data, data_cfg), (out_model, model_cfg), (out_train, train_cfg), (out_eval, eval_cfg)]:
+for path, cfg in [
+    (out_data, data_cfg),
+    (out_model, model_cfg),
+    (out_train, train_cfg),
+    (out_eval, eval_cfg),
+]:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
@@ -251,15 +303,15 @@ PY
 
 run_experiment() {
   local exp="$1"
-  local vision_mode="$2"
-  local fusion_type="$3"
-  local use_height="$4"
-  local use_language="$5"
-  local fixed_gate_alpha="$6"
+  local lr="$2"
+  local train_batch="$3"
+  local dz_beta="$4"
+  local sign_weight="$5"
+  local dz_weight="$6"
 
   if ! selected "${exp}"; then
-    log_event "SKIP" "${exp}" "filtered by EXPERIMENTS"
-    return 0
+    log_event "SKIP_EXPERIMENT" "${exp}" "filtered by EXPERIMENTS=${EXPERIMENTS:-}"
+    return
   fi
 
   local exp_dir="${RUN_DIR}/${exp}"
@@ -268,9 +320,8 @@ run_experiment() {
   local train_config="${CONFIG_DIR}/${exp}_train.yaml"
   local eval_config="${CONFIG_DIR}/${exp}_eval.yaml"
   mkdir -p "${exp_dir}"
-  generate_configs "${exp}" "${vision_mode}" "${fusion_type}" "${use_height}" "${use_language}" "${fixed_gate_alpha}"
-
-  log_event "CONFIG" "${exp}" "generated configs in ${CONFIG_DIR}"
+  generate_configs "${exp}" "${lr}" "${train_batch}" "${dz_beta}" "${sign_weight}" "${dz_weight}"
+  log_event "CONFIG" "${exp}" "lr=${lr}; batch=${train_batch}; dz_beta=${dz_beta}; sign_weight=${sign_weight}; dz_weight=${dz_weight}"
 
   if [[ -f "${exp_dir}/.train_done" ]]; then
     log_event "SKIP_TRAIN" "${exp}" "train done marker exists"
@@ -298,7 +349,7 @@ run_experiment() {
       set -e
       if [[ ${rc} -ne 0 ]]; then
         log_event "FAIL_TRAIN" "${exp}" "exit_code=${rc}"
-        exit ${rc}
+        exit "${rc}"
       fi
       find "${exp_dir}/checkpoints" -maxdepth 1 -type f -name "epoch_*.pth" -delete 2>/dev/null || true
       touch "${exp_dir}/.train_done"
@@ -341,7 +392,7 @@ run_experiment() {
       set -e
       if [[ ${rc} -ne 0 ]]; then
         log_event "FAIL_EVAL" "${exp}" "${split}: exit_code=${rc}"
-        exit ${rc}
+        exit "${rc}"
       fi
       touch "${exp_dir}/.eval_${split}_done"
       log_event "DONE_EVAL" "${exp}" "${split}"
@@ -349,16 +400,18 @@ run_experiment() {
   done
 }
 
-log_event "START" "all" "run_dir=${RUN_DIR}; data_dir=${DATA_DIR}; epochs=${EPOCHS}; train_batch=${TRAIN_BATCH_SIZE}; eval_batch=${EVAL_BATCH_SIZE}"
+EXPERIMENT_GRID=(
+  "lr5e-5_bs96_beta0.5_sign0.2_dzw2_ep15|5.0e-5|96|0.5|0.2|2.0"
+  "lr5e-5_bs96_beta0.5_sign0.15_dzw2_ep15|5.0e-5|96|0.5|0.15|2.0"
+  "lr5e-5_bs96_beta0.5_sign0.2_dzw3_ep15|5.0e-5|96|0.5|0.2|3.0"
+)
 
-run_experiment "front_only" "front_only" "concat" "true" "true" "none"
-run_experiment "down_only" "down_only" "concat" "true" "true" "none"
-run_experiment "concat_fusion" "dual" "concat" "true" "true" "none"
-run_experiment "fixed_fusion" "dual" "height_cond" "true" "true" "0.5"
-run_experiment "ha_dvf" "dual" "height_cond" "true" "true" "none"
-run_experiment "ha_dvf_no_altitude" "dual" "height_cond" "false" "true" "none"
-run_experiment "ha_dvf_no_language" "dual" "height_cond" "true" "false" "none"
-run_experiment "cross_attn_reference" "dual" "cross_attn" "true" "true" "none"
+log_event "START" "all" "run_dir=${RUN_DIR}; data_dir=${DATA_DIR}; epochs=${EPOCHS}; eval_splits=${SPLITS}"
+
+for item in "${EXPERIMENT_GRID[@]}"; do
+  IFS="|" read -r exp lr train_batch dz_beta sign_weight dz_weight <<< "${item}"
+  run_experiment "${exp}" "${lr}" "${train_batch}" "${dz_beta}" "${sign_weight}" "${dz_weight}"
+done
 
 log_event "DONE" "all" "run_dir=${RUN_DIR}"
 echo "Run directory: ${RUN_DIR}"
