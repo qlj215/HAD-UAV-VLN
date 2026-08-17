@@ -23,6 +23,7 @@ from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class PolicyHead(nn.Module):
@@ -105,31 +106,50 @@ class MultiHeadPolicy(nn.Module):
         dz_sign_hidden_dim: int = 128,
         dropout: float = 0.3,
         yaw_strategy: str = "baseline",
+        dz_strategy: str = "baseline",
+        dz_direction_threshold: float = 0.25,
     ):
         super().__init__()
 
-        self.yaw_strategy = str(yaw_strategy or "baseline").lower()
-        valid_yaw_strategies = {"baseline", "first_step_head", "rule_gated_expert"}
+        requested_yaw_strategy = str(yaw_strategy or "baseline").lower()
+        # ``rule_gated_expert`` is retained as a config alias so historical
+        # checkpoints reconstruct exactly the same module names.
+        yaw_aliases = {"rule_gated_expert": "stage_split"}
+        self.yaw_strategy = yaw_aliases.get(
+            requested_yaw_strategy, requested_yaw_strategy
+        )
+        valid_yaw_strategies = {"baseline", "first_step_head", "stage_split"}
         if self.yaw_strategy not in valid_yaw_strategies:
             raise ValueError(
                 f"未知 yaw_strategy: {yaw_strategy}. "
                 f"可选: {sorted(valid_yaw_strategies)}"
             )
 
+        self.dz_strategy = str(dz_strategy or "baseline").lower()
+        if self.dz_strategy not in {"baseline", "direction_magnitude"}:
+            raise ValueError(
+                f"未知 dz_strategy: {dz_strategy}. "
+                "可选: baseline/direction_magnitude"
+            )
+        self.dz_direction_threshold = float(dz_direction_threshold)
+        if self.dz_direction_threshold < 0:
+            raise ValueError("dz_direction_threshold must be non-negative")
+
         if self.yaw_strategy == "baseline":
-            # 连续动作头，保持原样
+            # Legacy keeps its exact four-output schema.  The decomposed dz
+            # variant predicts only dx/dy/yaw here, avoiding a dormant dz row.
             self.action_head = PolicyHead(
                 input_dim=input_dim,
                 hidden_dims=policy_hidden_dims,
                 dropout=dropout,
-                output_dim=4,
+                output_dim=3 if self.dz_strategy == "direction_magnitude" else 4,
             )
         else:
             self.xyz_head = PolicyHead(
                 input_dim=input_dim,
                 hidden_dims=policy_hidden_dims,
                 dropout=dropout,
-                output_dim=3,
+                output_dim=2 if self.dz_strategy == "direction_magnitude" else 3,
             )
             self.yaw_init_head = PolicyHead(
                 input_dim=input_dim,
@@ -171,6 +191,21 @@ class MultiHeadPolicy(nn.Module):
             if use_dz_sign_aux
             else None
         )
+        if self.dz_strategy == "direction_magnitude":
+            self.dz_direction_head = nn.Sequential(
+                nn.Linear(input_dim, int(dz_sign_hidden_dim)),
+                nn.LayerNorm(int(dz_sign_hidden_dim)),
+                nn.ReLU(inplace=True),
+                nn.Dropout(dropout),
+                nn.Linear(int(dz_sign_hidden_dim), 3),
+            )
+            self.dz_magnitude_head = nn.Sequential(
+                nn.Linear(input_dim, int(dz_sign_hidden_dim)),
+                nn.LayerNorm(int(dz_sign_hidden_dim)),
+                nn.ReLU(inplace=True),
+                nn.Dropout(dropout),
+                nn.Linear(int(dz_sign_hidden_dim), 2),
+            )
 
     def _step_gate(
         self,
@@ -190,21 +225,53 @@ class MultiHeadPolicy(nn.Module):
         step_ids: Optional[torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
         if self.yaw_strategy == "baseline":
-            return {"pred_action": self.action_head(fused_feat)}
+            base_action = self.action_head(fused_feat)
+            if self.dz_strategy == "direction_magnitude":
+                zero_dz = base_action.new_zeros(base_action.size(0), 1)
+                base_action = torch.cat(
+                    [base_action[:, :2], zero_dz, base_action[:, 2:3]], dim=-1
+                )
+            outputs = {"pred_action": base_action}
+        else:
+            pred_xyz = self.xyz_head(fused_feat)
+            if self.dz_strategy == "direction_magnitude":
+                pred_xyz = torch.cat(
+                    [pred_xyz, pred_xyz.new_zeros(pred_xyz.size(0), 1)], dim=-1
+                )
+            yaw_init = self.yaw_init_head(fused_feat)
+            yaw_normal = self.yaw_normal_head(fused_feat)
+            yaw_gate = self._step_gate(fused_feat, step_ids)
+            pred_yaw = yaw_gate * yaw_init + (1.0 - yaw_gate) * yaw_normal
+            outputs = {
+                "pred_action": torch.cat([pred_xyz, pred_yaw], dim=-1),
+                "pred_xyz": pred_xyz,
+                "yaw_init": yaw_init,
+                "yaw_normal": yaw_normal,
+                "yaw_gate": yaw_gate,
+            }
 
-        pred_xyz = self.xyz_head(fused_feat)
-        yaw_init = self.yaw_init_head(fused_feat)
-        yaw_normal = self.yaw_normal_head(fused_feat)
-        yaw_gate = self._step_gate(fused_feat, step_ids)
-        pred_yaw = yaw_gate * yaw_init + (1.0 - yaw_gate) * yaw_normal
-
-        return {
-            "pred_action": torch.cat([pred_xyz, pred_yaw], dim=-1),
-            "pred_xyz": pred_xyz,
-            "yaw_init": yaw_init,
-            "yaw_normal": yaw_normal,
-            "yaw_gate": yaw_gate,
-        }
+        if self.dz_strategy == "direction_magnitude":
+            direction_logits = self.dz_direction_head(fused_feat)
+            direction_prob = torch.softmax(direction_logits, dim=-1)
+            # Index 0 is ascend (negative NED dz), index 2 descend (positive).
+            magnitude = F.softplus(self.dz_magnitude_head(fused_feat))
+            expected_dz = (
+                direction_prob[:, 2] * magnitude[:, 1]
+                - direction_prob[:, 0] * magnitude[:, 0]
+            )
+            base_action = outputs["pred_action"]
+            pred_action = torch.cat(
+                [base_action[:, :2], expected_dz.unsqueeze(-1), base_action[:, 3:4]],
+                dim=-1,
+            )
+            outputs.update({
+                "pred_action": pred_action,
+                "dz_direction_logits": direction_logits,
+                "dz_direction_prob": direction_prob,
+                "dz_magnitude": magnitude,
+                "dz_expected": expected_dz,
+            })
+        return outputs
 
     def forward(
         self,

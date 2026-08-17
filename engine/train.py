@@ -27,6 +27,7 @@ HAD-UAV-VLN 训练引擎。
 
 import argparse
 import json
+import math
 import os
 import platform
 import random
@@ -144,6 +145,61 @@ class Trainer:
         self.dz_sign_weight = float(self.dz_sign_cfg.get("weight", 0.2))
         self.dz_sign_class_weights = self.dz_sign_cfg.get("class_weights")
 
+        inferred_train_action_std = self._infer_train_action_std(train_loader)
+        self.reliability_cfg = loss_cfg.get("reliability_nll") or {}
+        self.reliability_weight = float(self.reliability_cfg.get("weight", 0.1))
+        self.reliability_action_std = self._normalize_action_std(
+            self.reliability_cfg.get("action_std", inferred_train_action_std)
+        )
+
+        self.dz_decomposition_cfg = loss_cfg.get("dz_decomposition") or {}
+        self.dz_direction_weight = float(
+            self.dz_decomposition_cfg.get("direction_weight", 0.2)
+        )
+        self.dz_magnitude_weight = float(
+            self.dz_decomposition_cfg.get("magnitude_weight", 0.2)
+        )
+        self.dz_magnitude_beta = float(
+            self.dz_decomposition_cfg.get("smooth_l1_beta", 0.5)
+        )
+        self.dz_direction_threshold = float(
+            self.dz_decomposition_cfg.get(
+                "threshold",
+                getattr(self.model.policy, "dz_direction_threshold", 0.25),
+            )
+        )
+        self.dz_direction_class_weights = self.dz_decomposition_cfg.get(
+            "class_weights"
+        )
+
+        selection_cfg = train_cfg.get("selection_metric", "val_loss")
+        if isinstance(selection_cfg, str):
+            selection_cfg = {"name": selection_cfg}
+        self.selection_metric_name = str(
+            selection_cfg.get("name", "val_loss")
+        ).lower()
+        if self.selection_metric_name not in {"val_loss", "normalized_action_mae"}:
+            raise ValueError(
+                "training.selection_metric must be val_loss or "
+                f"normalized_action_mae, got {self.selection_metric_name!r}"
+            )
+        self.selection_action_std = self._normalize_action_std(
+            selection_cfg.get(
+                "action_std",
+                train_cfg.get("action_stats", {}).get(
+                    "std", self.reliability_action_std
+                ),
+            )
+        )
+        self.metrics_cfg = train_cfg.get("metrics", {}) or {}
+        self.metrics_dz_tail_threshold = self.metrics_cfg.get("dz_tail_threshold")
+        if str(self.metrics_dz_tail_threshold).lower() in {"train_p90", "p90"}:
+            self.metrics_dz_tail_threshold = self._infer_train_dz_tail_threshold(
+                train_loader, quantile=0.90
+            )
+        elif self.metrics_dz_tail_threshold is not None:
+            self.metrics_dz_tail_threshold = float(self.metrics_dz_tail_threshold)
+
         self.use_progress = model.policy.progress_head is not None
 
         # 预计算每条轨迹的最大 step_id (用于 progress 标签)
@@ -165,11 +221,15 @@ class Trainer:
         self.log_interval = log_cfg.get("log_interval", 50)
         self.eval_interval = log_cfg.get("eval_interval", 1)
         self.save_interval = log_cfg.get("save_interval", 5)
+        self.keep_epoch_checkpoints = bool(
+            log_cfg.get("keep_epoch_checkpoints", True)
+        )
 
         # ---- 状态 ----
         self.current_epoch = 0
         self.global_step = 0
         self.best_val_loss = float("inf")
+        self.best_selection_score = float("inf")
         self.train_log: list = []
 
         # ---- 目录 ----
@@ -219,7 +279,17 @@ class Trainer:
             "yaw_loss": self.yaw_loss_cfg,
             "dz_loss": self.dz_loss_cfg,
             "dz_sign_loss": self.dz_sign_cfg,
+            "reliability_nll": self.reliability_cfg,
+            "reliability_action_std": self.reliability_action_std,
+            "dz_decomposition": self.dz_decomposition_cfg,
             "yaw_strategy": getattr(self.model.policy, "yaw_strategy", "baseline"),
+            "dz_strategy": getattr(self.model.policy, "dz_strategy", "baseline"),
+            "selection_metric": self.selection_metric_name,
+            "selection_action_std": self.selection_action_std,
+            "metrics": {
+                **self.metrics_cfg,
+                "dz_tail_threshold_resolved": self.metrics_dz_tail_threshold,
+            },
             "use_progress": self.use_progress,
             "use_amp": self.use_amp,
             "grad_clip_enabled": self.grad_clip_enabled,
@@ -233,6 +303,56 @@ class Trainer:
             print(f"  [CONFIG] {path}")
         except Exception as exc:
             print(f"  [WARN] Failed to save run config to {path}: {exc}")
+
+    @staticmethod
+    def _normalize_action_std(value) -> list:
+        """Validate and normalize persisted train-set action standard deviations."""
+        if isinstance(value, dict):
+            value = [value.get(k, 1.0) for k in ("dx", "dy", "dz", "dyaw")]
+        if not isinstance(value, (list, tuple)) or len(value) != 4:
+            raise ValueError("action_std must contain dx, dy, dz, dyaw")
+        result = [float(v) for v in value]
+        if any((not math.isfinite(v)) or v <= 0 for v in result):
+            raise ValueError(f"action_std must be finite and positive, got {result}")
+        return result
+
+    @staticmethod
+    def _infer_train_action_std(train_loader: DataLoader) -> list:
+        """Compute non-terminal population std once from formal train records."""
+        samples = getattr(getattr(train_loader, "dataset", None), "samples", None)
+        if not samples:
+            return [1.0, 1.0, 1.0, 1.0]
+        actions = [
+            sample.get("action")
+            for sample in samples
+            if not bool(sample.get("done", False))
+            and isinstance(sample.get("action"), (list, tuple))
+            and len(sample.get("action")) == 4
+        ]
+        if not actions:
+            return [1.0, 1.0, 1.0, 1.0]
+        values = torch.tensor(actions, dtype=torch.float64)
+        std = values.std(dim=0, unbiased=False).clamp_min(1e-6)
+        return [float(value) for value in std.tolist()]
+
+    @staticmethod
+    def _infer_train_dz_tail_threshold(
+        train_loader: DataLoader,
+        quantile: float = 0.90,
+    ) -> Optional[float]:
+        samples = getattr(getattr(train_loader, "dataset", None), "samples", None)
+        if not samples:
+            return None
+        magnitudes = [
+            abs(float(sample["action"][2]))
+            for sample in samples
+            if not bool(sample.get("done", False))
+            and isinstance(sample.get("action"), (list, tuple))
+            and len(sample.get("action")) == 4
+        ]
+        if not magnitudes:
+            return None
+        return float(torch.tensor(magnitudes, dtype=torch.float64).quantile(quantile))
 
     # ---- 优化器构建 ----
 
@@ -416,6 +536,103 @@ class Trainer:
             )
         return F.cross_entropy(logits[mask], targets[mask], weight=class_weight)
 
+    def _compute_reliability_nll(
+        self,
+        outputs: dict,
+        gt_action: torch.Tensor,
+        not_done_mask_1d: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-view heteroscedastic NLL in standardized action units."""
+        action_mean = outputs.get("reliability_action_mean")
+        logvar = outputs.get("reliability_logvar")
+        if action_mean is None or logvar is None:
+            return gt_action.new_tensor(0.0)
+        if action_mean.ndim != 3 or action_mean.shape[1:] != (2, 4):
+            raise ValueError(
+                "reliability_action_mean must have shape (B, 2, 4), "
+                f"got {tuple(action_mean.shape)}"
+            )
+        if tuple(logvar.shape) != tuple(action_mean.shape[:2]):
+            raise ValueError("reliability_logvar must have shape (B, 2)")
+
+        error = action_mean - gt_action.unsqueeze(1)
+        yaw_error = torch.atan2(
+            torch.sin(error[..., 3]), torch.cos(error[..., 3])
+        ).unsqueeze(-1)
+        error = torch.cat([error[..., :3], yaw_error], dim=-1)
+        std = error.new_tensor(self.reliability_action_std).view(1, 1, 4)
+        standardized_sq = ((error / std) ** 2).mean(dim=-1)
+        bounded_logvar = logvar.clamp(-10.0, 10.0)
+        nll = 0.5 * (
+            torch.exp(-bounded_logvar) * standardized_sq + bounded_logvar
+        )
+        valid = (not_done_mask_1d > 0).view(-1, 1).expand_as(nll)
+        if valid.any():
+            return nll[valid].mean()
+        return nll.sum() * 0.0
+
+    def _compute_dz_decomposition_losses(
+        self,
+        outputs: dict,
+        gt_action: torch.Tensor,
+        not_done_mask_1d: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        logits = outputs.get("dz_direction_logits")
+        magnitude = outputs.get("dz_magnitude")
+        if logits is None or magnitude is None:
+            zero = gt_action.new_tensor(0.0)
+            return zero, zero
+
+        valid = not_done_mask_1d > 0
+        if not valid.any():
+            zero = logits.sum() * 0.0 + magnitude.sum() * 0.0
+            return zero, zero
+
+        dz_gt = gt_action[:, 2]
+        targets = torch.ones_like(dz_gt, dtype=torch.long)
+        targets = torch.where(
+            dz_gt < -self.dz_direction_threshold,
+            torch.zeros_like(targets),
+            targets,
+        )
+        targets = torch.where(
+            dz_gt > self.dz_direction_threshold,
+            torch.full_like(targets, 2),
+            targets,
+        )
+        direction_class_weight = None
+        class_weights = getattr(self, "dz_direction_class_weights", None)
+        if class_weights is not None:
+            direction_class_weight = torch.tensor(
+                class_weights,
+                dtype=logits.dtype,
+                device=logits.device,
+            )
+            if direction_class_weight.numel() != 3:
+                raise ValueError("dz decomposition class_weights must contain 3 values")
+        direction_loss = F.cross_entropy(
+            logits[valid], targets[valid], weight=direction_class_weight
+        )
+
+        directional = valid & (targets != 1)
+        if directional.any():
+            magnitude_index = torch.where(
+                targets[directional] == 0,
+                torch.zeros_like(targets[directional]),
+                torch.ones_like(targets[directional]),
+            )
+            selected = magnitude[directional].gather(
+                1, magnitude_index.unsqueeze(1)
+            ).squeeze(1)
+            magnitude_loss = F.smooth_l1_loss(
+                selected,
+                dz_gt[directional].abs(),
+                beta=self.dz_magnitude_beta,
+            )
+        else:
+            magnitude_loss = magnitude.sum() * 0.0
+        return direction_loss, magnitude_loss
+
     def _masked_mean(self, values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         mask = mask.to(dtype=values.dtype, device=values.device)
         denom = mask.sum()
@@ -523,6 +740,7 @@ class Trainer:
                 "first_step_head",
                 "gated_expert",
                 "rule_gated_expert",
+                "stage_split",
             }:
                 yaw_loss, yaw_parts = self._compute_expert_yaw_loss(
                     outputs, yaw_gt, step_ids, not_done_1d
@@ -572,6 +790,27 @@ class Trainer:
             losses["dz_sign"] = dz_sign_loss
             total = total + self.dz_sign_weight * dz_sign_loss
 
+        reliability_nll = self._compute_reliability_nll(
+            outputs, gt_action, not_done_mask.squeeze(-1)
+        )
+        if outputs.get("reliability_logvar") is not None:
+            losses["reliability_nll"] = reliability_nll
+            total = total + self.reliability_weight * reliability_nll
+
+        if getattr(self.model.policy, "dz_strategy", "baseline") == "direction_magnitude":
+            dz_direction_loss, dz_magnitude_loss = (
+                self._compute_dz_decomposition_losses(
+                    outputs, gt_action, not_done_mask.squeeze(-1)
+                )
+            )
+            losses["dz_direction"] = dz_direction_loss
+            losses["dz_magnitude"] = dz_magnitude_loss
+            total = (
+                total
+                + self.dz_direction_weight * dz_direction_loss
+                + self.dz_magnitude_weight * dz_magnitude_loss
+            )
+
         # Stop 损失
         stop_logit = outputs.get("stop_logit")
         if stop_logit is not None:
@@ -600,6 +839,7 @@ class Trainer:
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
         epoch_losses: Dict[str, float] = {}
+        epoch_sample_count = 0
 
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch} [Train]", dynamic_ncols=True)
         for batch_idx, batch in enumerate(pbar):
@@ -676,8 +916,12 @@ class Trainer:
                 self.scheduler.step()
 
             # 累加损失
+            batch_sample_count = int(batch["action"].shape[0])
+            epoch_sample_count += batch_sample_count
             for k, v in loss_dict.items():
-                epoch_losses[k] = epoch_losses.get(k, 0.0) + v.item()
+                epoch_losses[k] = (
+                    epoch_losses.get(k, 0.0) + v.item() * batch_sample_count
+                )
 
             # 日志
             if batch_idx % self.log_interval == 0:
@@ -689,8 +933,8 @@ class Trainer:
 
             self.global_step += 1
 
-        n = max(len(self.train_loader), 1)
-        return {k: v / n for k, v in epoch_losses.items()}
+        denominator = max(epoch_sample_count, 1)
+        return {k: v / denominator for k, v in epoch_losses.items()}
 
     # ---- 验证 ----
 
@@ -699,7 +943,7 @@ class Trainer:
         self.model.eval()
         all_batch_metrics = []
         val_loss_total = 0.0
-        n_batches = 0
+        val_loss_count = 0
 
         pbar = tqdm(self.val_loader, desc="[Val]", dynamic_ncols=True)
         for batch in pbar:
@@ -725,8 +969,9 @@ class Trainer:
                     step_ids=step_ids,
                 )
             _, loss_dict = self.compute_losses(outputs, batch)
-            val_loss_total += loss_dict.get("total", 0.0).item()
-            n_batches += 1
+            batch_count = int(batch["action"].shape[0])
+            val_loss_total += loss_dict.get("total", 0.0).item() * batch_count
+            val_loss_count += batch_count
 
             # 指标
             m = compute_metrics(
@@ -736,12 +981,26 @@ class Trainer:
                 gt_done=batch["done"].to(self.device),
                 altitude=batch["altitude"].to(self.device),
                 height_stage=batch["height_stage"].to(self.device),
+                step_ids=step_ids,
+                dz_threshold=self.dz_direction_threshold,
+                dz_tail_threshold=self.metrics_dz_tail_threshold,
             )
             all_batch_metrics.append(m)
 
-        val_loss = val_loss_total / max(n_batches, 1)
+        val_loss = val_loss_total / max(val_loss_count, 1)
         epoch_metrics = aggregate_epoch_metrics(all_batch_metrics)
         epoch_metrics["val_loss"] = val_loss
+        normalized_terms = []
+        for name, std in zip(
+            ("dx", "dy", "dz", "dyaw"), self.selection_action_std
+        ):
+            value = epoch_metrics.get(f"{name}_mae")
+            if value is not None:
+                normalized_terms.append(float(value) / std)
+        epoch_metrics["normalized_action_mae"] = (
+            sum(normalized_terms) / len(normalized_terms)
+            if len(normalized_terms) == 4 else None
+        )
         return epoch_metrics
 
     def compute_trajectory_metrics_for_loader(
@@ -801,6 +1060,9 @@ class Trainer:
                 train_log_entry["val_trajectory"] = val_trajectory_metrics
 
                 val_loss = val_metrics.get("val_loss", float("inf"))
+                selection_score = val_metrics.get(self.selection_metric_name)
+                if selection_score is None:
+                    selection_score = float("inf")
                 print(f"  Epoch {epoch:3d}/{epochs} | "
                       f"train_loss={train_losses.get('total', 0):.4f} | "
                       f"val_loss={val_loss:.4f} | "
@@ -814,26 +1076,42 @@ class Trainer:
                     self.scheduler.step(val_loss)
 
                 # 保存最佳
-                if val_loss < self.best_val_loss:
+                if selection_score < self.best_selection_score:
+                    self.best_selection_score = float(selection_score)
                     self.best_val_loss = val_loss
                     self.save_checkpoint("best_model.pth")
-                    print(f"  [BEST] val_loss={val_loss:.4f}")
+                    print(
+                        f"  [BEST] {self.selection_metric_name}="
+                        f"{selection_score:.6f} (val_loss={val_loss:.4f})"
+                    )
             else:
                 print(f"  Epoch {epoch:3d}/{epochs} | "
                       f"train_loss={train_losses.get('total', 0):.4f}")
 
+            # Append before the resumable epoch checkpoint so an interrupted
+            # run retains a complete, non-duplicated history through this epoch.
+            self.train_log.append(train_log_entry)
+
             # 定期保存
             if epoch % self.save_interval == 0:
-                self.save_checkpoint(f"epoch_{epoch:04d}.pth")
-
-            self.train_log.append(train_log_entry)
+                self._save_periodic_checkpoint(epoch)
 
         # 最终保存
         self.save_checkpoint("last_model.pth")
         self._save_log()
-        print(f"\n[DONE] Training complete. Best val_loss={self.best_val_loss:.4f}")
+        print(
+            f"\n[DONE] Training complete. Best {self.selection_metric_name}="
+            f"{self.best_selection_score:.6f}"
+        )
 
     # ---- 检查点 ----
+
+    def _save_periodic_checkpoint(self, epoch: int) -> None:
+        """Persist either an epoch archive or one rolling resume checkpoint."""
+        if self.keep_epoch_checkpoints:
+            self.save_checkpoint(f"epoch_{epoch:04d}.pth")
+        else:
+            self.save_checkpoint("last_model.pth")
 
     def save_checkpoint(self, filename: str):
         ckpt = {
@@ -844,10 +1122,15 @@ class Trainer:
             "scaler_state_dict": self.scaler.state_dict() if self.scaler else None,
             "scheduler_state_dict": self.scheduler.state_dict() if self.scheduler else None,
             "best_val_loss": self.best_val_loss,
+            "best_selection_score": self.best_selection_score,
+            "selection_metric_name": self.selection_metric_name,
+            "train_log": self.train_log,
             "config": self.config,
         }
         path = self.ckpt_dir / filename
-        torch.save(ckpt, path)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        torch.save(ckpt, temporary)
+        os.replace(temporary, path)
         print(f"  [SAVE] {path}")
 
     def load_checkpoint(self, checkpoint_path: str):
@@ -861,11 +1144,15 @@ class Trainer:
         self.current_epoch = ckpt.get("epoch", 0)
         self.global_step = ckpt.get("global_step", 0)
         self.best_val_loss = ckpt.get("best_val_loss", float("inf"))
+        self.best_selection_score = ckpt.get(
+            "best_selection_score", self.best_val_loss
+        )
+        self.train_log = list(ckpt.get("train_log", []))
         print(f"[LOAD] Resumed from epoch {self.current_epoch}, step {self.global_step}")
 
     def _save_log(self):
         path = self.log_dir / "train_log.json"
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(self.train_log, f, indent=2, ensure_ascii=False)
         print(f"  [LOG] {path}")
 
@@ -1076,12 +1363,15 @@ def build_model_from_config(model_cfg: dict) -> HADVLNModel:
     fusion_hidden_dim = fusion.get("hidden_dim", 512)
     fusion_num_heads = fusion.get("num_heads", 8)
     fusion_dropout = fusion.get("dropout", 0.2)
+    fusion_reliability_mode = fusion.get("reliability_mode", "legacy")
 
     # ---- 策略头 ----
     policy = m.get("policy_head", {})
     policy_hidden_dims = tuple(policy.get("hidden_dims", [512, 256]))
-    policy_dropout = policy.get("dropout", 0.3)
+    policy_dropout = policy.get("dropout")
     policy_yaw_strategy = policy.get("yaw_strategy", "baseline")
+    policy_dz_strategy = policy.get("dz_strategy", "baseline")
+    dz_direction_threshold = float(policy.get("dz_direction_threshold", 0.25))
 
     # ---- 辅助任务 ----
     aux = m.get("auxiliary_tasks", {})
@@ -1112,8 +1402,12 @@ def build_model_from_config(model_cfg: dict) -> HADVLNModel:
         fusion_type=fusion_type,
         fusion_hidden_dim=fusion_hidden_dim,
         fusion_num_heads=fusion_num_heads,
+        fusion_reliability_mode=fusion_reliability_mode,
         policy_hidden_dims=policy_hidden_dims,
         policy_yaw_strategy=policy_yaw_strategy,
+        policy_dropout=policy_dropout,
+        policy_dz_strategy=policy_dz_strategy,
+        dz_direction_threshold=dz_direction_threshold,
         use_progress_monitor=use_progress_monitor,
         use_dz_sign_aux=use_dz_sign_aux,
         dz_sign_hidden_dim=dz_sign_hidden_dim,

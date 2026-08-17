@@ -52,6 +52,8 @@ def evaluate_split(
     success_threshold: float = 20.0,
     stop_threshold: float = 0.3,
     max_steps: int = 200,
+    dz_threshold: float = 0.25,
+    dz_tail_threshold: Optional[float] = None,
 ) -> Dict[str, Any]:
     """在单个 split 上运行评估。
 
@@ -107,6 +109,9 @@ def evaluate_split(
             altitude=batch["altitude"].to(device),
             height_stage=batch["height_stage"].to(device),
             stop_threshold=stop_threshold,
+            step_ids=step_ids,
+            dz_threshold=dz_threshold,
+            dz_tail_threshold=dz_tail_threshold,
         )
         all_batch_metrics.append(m)
 
@@ -115,14 +120,50 @@ def evaluate_split(
             for i in range(len(batch["meta"])):
                 meta = batch["meta"][i]
                 gw = outputs.get("gate_weight")
+                rel_mean = outputs.get("reliability_action_mean")
+                rel_logvar = outputs.get("reliability_logvar")
+                dz_prob = outputs.get("dz_direction_prob")
+                dz_mag = outputs.get("dz_magnitude")
+                yaw_gate = outputs.get("yaw_gate")
+                stage_id = int(batch["height_stage"][i].item())
                 all_predictions.append({
                     "sample_id": meta["sample_id"],
                     "scene_id": meta["scene_id"],
                     "trajectory_id": meta["trajectory_id"],
                     "step_id": meta["step_id"],
+                    "altitude": float(batch["altitude"][i].view(-1)[0].item()),
+                    "height_stage": stage_id,
+                    "height_stage_name": {0: "low", 1: "mid", 2: "high"}.get(stage_id),
                     "pred_action": outputs["pred_action"][i].cpu().tolist(),
                     "gt_action": batch["action"][i].cpu().tolist() if batch.get("action") is not None else None,
                     "gate_weight": gw[i].cpu().tolist() if gw is not None else None,
+                    "reliability_action_mean": (
+                        rel_mean[i].cpu().tolist() if rel_mean is not None else None
+                    ),
+                    "reliability_logvar": (
+                        rel_logvar[i].cpu().tolist() if rel_logvar is not None else None
+                    ),
+                    "dz_direction_prob": (
+                        dz_prob[i].cpu().tolist() if dz_prob is not None else None
+                    ),
+                    "dz_magnitude": (
+                        dz_mag[i].cpu().tolist() if dz_mag is not None else None
+                    ),
+                    "dz_expected": (
+                        float(outputs["dz_expected"][i].item())
+                        if outputs.get("dz_expected") is not None else None
+                    ),
+                    "yaw_init": (
+                        float(outputs["yaw_init"][i].item())
+                        if outputs.get("yaw_init") is not None else None
+                    ),
+                    "yaw_normal": (
+                        float(outputs["yaw_normal"][i].item())
+                        if outputs.get("yaw_normal") is not None else None
+                    ),
+                    "yaw_gate": (
+                        float(yaw_gate[i].item()) if yaw_gate is not None else None
+                    ),
                     "stop_logit": (
                         outputs["stop_logit"][i].item()
                         if outputs.get("stop_logit") is not None else None
@@ -276,9 +317,15 @@ def save_eval_config_snapshot(
     return path
 
 
-def build_model_from_checkpoint(ckpt_path: str, device: torch.device) -> HADVLNModel:
+def build_model_from_checkpoint(
+    ckpt_path: str,
+    device: torch.device,
+    checkpoint_data: Optional[Dict[str, Any]] = None,
+) -> HADVLNModel:
     """从检查点构建并加载模型。读取保存的 config 重建架构后加载权重。"""
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+    ckpt = checkpoint_data
+    if ckpt is None:
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
     saved_config = ckpt.get("config", {})
     model_cfg = saved_config.get("model", saved_config)
     m = model_cfg.get("model", model_cfg)  # 兼容顶层 "model:" key
@@ -315,8 +362,12 @@ def build_model_from_checkpoint(ckpt_path: str, device: torch.device) -> HADVLNM
         fusion_type=fusion.get("fusion_type", "height_cond"),
         fusion_hidden_dim=fusion.get("hidden_dim", 512),
         fusion_num_heads=fusion.get("num_heads", 8),
+        fusion_reliability_mode=fusion.get("reliability_mode", "legacy"),
         policy_hidden_dims=tuple(policy.get("hidden_dims", [512, 256])),
         policy_yaw_strategy=policy.get("yaw_strategy", "baseline"),
+        policy_dropout=policy.get("dropout"),
+        policy_dz_strategy=policy.get("dz_strategy", "baseline"),
+        dz_direction_threshold=float(policy.get("dz_direction_threshold", 0.25)),
         use_progress_monitor=aux.get("progress_monitor", False),
         use_dz_sign_aux=use_dz_sign_aux,
         dz_sign_hidden_dim=dz_sign_hidden_dim,
@@ -386,6 +437,11 @@ def main():
     success_threshold = float(trajectory_cfg.get("success_threshold", eval_cfg.get("success_threshold", 20.0)))
     stop_threshold = float(eval_cfg.get("stop_threshold", 0.3))
     max_steps = int(trajectory_cfg.get("max_steps", eval_cfg.get("max_steps", 200)))
+    action_metrics_cfg = eval_cfg.get("action_metrics", {}) or {}
+    dz_threshold = float(action_metrics_cfg.get("dz_threshold", 0.25))
+    dz_tail_threshold = action_metrics_cfg.get("dz_tail_threshold")
+    if dz_tail_threshold is not None:
+        dz_tail_threshold = float(dz_tail_threshold)
 
     # 设备
     if device_name == "auto":
@@ -453,6 +509,8 @@ def main():
         success_threshold=success_threshold,
         stop_threshold=stop_threshold,
         max_steps=max_steps,
+        dz_threshold=dz_threshold,
+        dz_tail_threshold=dz_tail_threshold,
     )
 
     # 打印结果

@@ -1,0 +1,18 @@
+evaluation:
+  batch_size: 8
+  num_workers: 0
+  device: "auto"
+  stop_threshold: 0.3
+  image_size: [224, 224]
+  trajectory:
+    success_threshold: 20.0
+    max_steps: 200
+
+qwen3vl:
+  base_model_name_or_path: "Qwen/Qwen3-VL-2B-Instruct"
+  image_size: [224, 224]
+  torch_dtype: "bfloat16"
+  attn_implementation: "sdpa"
+  max_new_tokens: 128
+  stop_logit_scale: 10.0
+  local_files_only: false

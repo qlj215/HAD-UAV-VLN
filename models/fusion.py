@@ -22,7 +22,7 @@ HAD-UAV-VLN 高度感知双视角融合模块。
   # gate:  (B, 2)    门控权重 [α_front, α_down] → 可解释性分析
 """
 
-from typing import Tuple, Optional
+from typing import Dict, Tuple, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -82,7 +82,9 @@ class HeightConditionedFusion(nn.Module):
     """高度条件门控融合。
 
     逻辑：
-    1. 用高度、文本、前视、俯视共同预测前视/俯视权重；
+    1. legacy 用高度、文本、前视、俯视共同预测权重；正式可靠性
+       消融则以掩码控制 height/content/combined 上下文，并令
+       gate=softmax(-log_variance)；
     2. 用 gate 融合两个视觉视角；
     3. 最终 fused 显式保留视觉、文本、高度三类信息。
     """
@@ -95,6 +97,8 @@ class HeightConditionedFusion(nn.Module):
         hidden_dim: int = 512,
         dropout: float = 0.2,
         fixed_gate_alpha: Optional[float] = None,
+        reliability_mode: str = "legacy",
+        action_dim: int = 4,
     ):
         super().__init__()
 
@@ -131,15 +135,58 @@ class HeightConditionedFusion(nn.Module):
             None if fixed_gate_alpha is None else float(fixed_gate_alpha)
         )
 
-        # 用四类信息共同预测视角权重
-        self.gate_net = nn.Sequential(
-            nn.Linear(hidden_dim * 4, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 2),
-            nn.Softmax(dim=-1),  # 两个视角权重和为 1
-        )
+        # ``legacy`` deliberately creates no additional parameters.  This is
+        # important because historical configs/checkpoints must retain their
+        # exact state-dict schema.  The three formal reliability ablations use
+        # the same modules and differ only in deterministic input masks.
+        reliability_mode = str(reliability_mode or "legacy").lower()
+        valid_reliability_modes = {
+            "legacy", "height_only", "content_only", "combined",
+        }
+        if reliability_mode not in valid_reliability_modes:
+            raise ValueError(
+                f"unknown reliability_mode={reliability_mode!r}; "
+                f"expected one of {sorted(valid_reliability_modes)}"
+            )
+        self.reliability_mode = reliability_mode
+        self.action_dim = int(action_dim)
+        if self.action_dim <= 0:
+            raise ValueError(f"action_dim must be positive, got {action_dim}")
+        if reliability_mode != "legacy" and self.fixed_gate_alpha is not None:
+            raise ValueError(
+                "fixed_gate_alpha and reliability_mode are mutually exclusive"
+            )
+
+        if reliability_mode != "legacy":
+            reliability_in_dim = hidden_dim * 3
+
+            def _make_reliability_head() -> nn.Sequential:
+                return nn.Sequential(
+                    nn.Linear(reliability_in_dim, hidden_dim),
+                    nn.LayerNorm(hidden_dim),
+                    nn.ReLU(inplace=True),
+                    nn.Dropout(dropout),
+                    nn.Linear(hidden_dim, self.action_dim + 1),
+                )
+
+            # Separate, equally-sized heads allow a height-only prior to learn
+            # different uncertainty profiles for the front and down cameras.
+            self.reliability_heads = nn.ModuleList(
+                [_make_reliability_head(), _make_reliability_head()]
+            )
+
+        if reliability_mode == "legacy":
+            # 用四类信息共同预测视角权重。Its conditional construction
+            # preserves historical state keys without leaving dormant gate
+            # parameters in the formal reliability variants.
+            self.gate_net = nn.Sequential(
+                nn.Linear(hidden_dim * 4, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, 2),
+                nn.Softmax(dim=-1),  # 两个视角权重和为 1
+            )
 
         # 关键修改：
         # 输入不再只是 weighted visual，而是 [weighted visual, text, height]
@@ -159,19 +206,47 @@ class HeightConditionedFusion(nn.Module):
         F_down: torch.Tensor,
         F_text: torch.Tensor,
         F_height: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[
+        torch.Tensor,
+        Union[torch.Tensor, Dict[str, torch.Tensor]],
+    ]:
 
         h_front = self.front_proj(F_front)    # (B, hidden)
         h_down = self.down_proj(F_down)       # (B, hidden)
         h_text = self.text_proj(F_text)       # (B, hidden)
         h_alt = self.height_proj(F_height)    # (B, hidden)
 
-        gate_input = torch.cat(
-            [h_front, h_down, h_text, h_alt],
-            dim=-1,
-        )
+        gate_input = torch.cat([h_front, h_down, h_text, h_alt], dim=-1)
 
-        if self.fixed_gate_alpha is not None:
+        reliability_aux: Optional[Dict[str, torch.Tensor]] = None
+        if self.reliability_mode != "legacy":
+            zero_view = torch.zeros_like(h_front)
+            zero_text = torch.zeros_like(h_text)
+            zero_height = torch.zeros_like(h_alt)
+
+            def _masked_context(view: torch.Tensor) -> torch.Tensor:
+                if self.reliability_mode == "height_only":
+                    fields = (zero_view, zero_text, h_alt)
+                elif self.reliability_mode == "content_only":
+                    fields = (view, h_text, zero_height)
+                else:  # combined
+                    fields = (view, h_text, h_alt)
+                return torch.cat(fields, dim=-1)
+
+            front_rel = self.reliability_heads[0](_masked_context(h_front))
+            down_rel = self.reliability_heads[1](_masked_context(h_down))
+            reliability_raw = torch.stack([front_rel, down_rel], dim=1)
+            action_mean = reliability_raw[..., : self.action_dim]
+            # A bounded log-variance prevents exp(-logvar) overflow while
+            # preserving gradients throughout the useful range.
+            logvar = reliability_raw[..., self.action_dim].clamp(-10.0, 10.0)
+            gate = torch.softmax(-logvar, dim=-1)
+            reliability_aux = {
+                "gate_weight": gate,
+                "reliability_action_mean": action_mean,
+                "reliability_logvar": logvar,
+            }
+        elif self.fixed_gate_alpha is not None:
             gate = F_front.new_tensor(
                 [self.fixed_gate_alpha, 1.0 - self.fixed_gate_alpha]
             ).unsqueeze(0).expand(F_front.size(0), -1)
@@ -189,7 +264,7 @@ class HeightConditionedFusion(nn.Module):
 
         fused = self.fusion_out(fusion_input) # (B, hidden)
 
-        return fused, gate
+        return fused, reliability_aux if reliability_aux is not None else gate
 
 
 # ================================================================

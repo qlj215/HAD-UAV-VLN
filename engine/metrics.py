@@ -13,6 +13,7 @@ in, the full trajectory metric set is returned as None so JSON outputs store
 these values as null instead of reporting misleading offline approximations.
 """
 
+import math
 from typing import Any, Dict, List, Optional, Sequence
 
 import torch
@@ -51,9 +52,29 @@ def compute_metrics(
     altitude: Optional[torch.Tensor] = None,
     height_stage: Optional[torch.Tensor] = None,
     stop_threshold: float = 0.3,
-) -> Dict[str, float]:
-    """Compute action-level metrics for one batch."""
-    metrics: Dict[str, float] = {}
+    step_ids: Optional[torch.Tensor] = None,
+    dz_threshold: float = 0.25,
+    dz_tail_threshold: Optional[float] = None,
+    rare_yaw_threshold: float = math.pi / 2,
+) -> Dict[str, Any]:
+    """Compute sufficient statistics and exact metrics for one batch.
+
+    Sufficient statistics are intentionally returned alongside derived values;
+    :func:`aggregate_epoch_metrics` sums them before division.  Consequently
+    results do not depend on dataloader batch boundaries.
+    """
+    metrics: Dict[str, Any] = {}
+    dim_names = ("dx", "dy", "dz", "dyaw")
+    if height_stage is not None:
+        height_stage = height_stage.to(pred_action.device).view(-1)
+    if step_ids is not None:
+        step_ids = step_ids.to(pred_action.device).view(-1)
+    if dz_threshold < 0:
+        raise ValueError("dz_threshold must be non-negative")
+    if dz_tail_threshold is not None and dz_tail_threshold < 0:
+        raise ValueError("dz_tail_threshold must be non-negative")
+    if rare_yaw_threshold < 0:
+        raise ValueError("rare_yaw_threshold must be non-negative")
 
     if gt_done is not None:
         not_done = (gt_done < 0.5).view(-1)
@@ -65,45 +86,100 @@ def compute_metrics(
     action_count = not_done.sum().item()
     if action_count > 0:
         diff = compute_action_error(pred_action[not_done], gt_action[not_done])
-        mse_per_dim = (diff ** 2).mean(dim=0)
-        mae_per_dim = diff.abs().mean(dim=0)
-
-        metrics["action_mse"] = mse_per_dim.mean().item()
-        metrics["action_mae"] = mae_per_dim.mean().item()
-        metrics["dx_mse"] = mse_per_dim[0].item()
-        metrics["dy_mse"] = mse_per_dim[1].item()
-        metrics["dz_mse"] = mse_per_dim[2].item()
-        metrics["dyaw_mse"] = mse_per_dim[3].item()
-        metrics["dx_mae"] = mae_per_dim[0].item()
-        metrics["dy_mae"] = mae_per_dim[1].item()
-        metrics["dz_mae"] = mae_per_dim[2].item()
-        metrics["dyaw_mae"] = mae_per_dim[3].item()
-        metrics["horizontal_mse"] = (mse_per_dim[0] + mse_per_dim[1]).item()
-        metrics["vertical_mse"] = mse_per_dim[2].item()
+        stat_diff = diff.double()
+        abs_sum = stat_diff.abs().sum(dim=0)
+        sq_sum = (stat_diff ** 2).sum(dim=0)
+        for index, name in enumerate(dim_names):
+            metrics[f"{name}_mae"] = abs_sum[index].item() / action_count
+            metrics[f"{name}_mse"] = sq_sum[index].item() / action_count
+            metrics[f"{name}_rmse"] = math.sqrt(metrics[f"{name}_mse"])
+        metrics["action_mae"] = sum(metrics[f"{d}_mae"] for d in dim_names) / 4
+        metrics["action_mse"] = sum(metrics[f"{d}_mse"] for d in dim_names) / 4
+        metrics["action_rmse"] = math.sqrt(metrics["action_mse"])
+        metrics["horizontal_mse"] = metrics["dx_mse"] + metrics["dy_mse"]
+        metrics["vertical_mse"] = metrics["dz_mse"]
 
         if height_stage is not None:
             for stage_id, stage_name in STAGE2NAME.items():
                 mask = height_stage[not_done] == stage_id
-                if mask.sum() > 0:
-                    stage_diff = diff[mask]
-                    metrics[f"action_mse_{stage_name}"] = (stage_diff ** 2).mean().item()
-                    metrics[f"action_mae_{stage_name}"] = stage_diff.abs().mean().item()
-                    metrics[f"action_count_{stage_name}"] = mask.sum().item()
+                stage_count = int(mask.sum().item())
+                metrics[f"action_count_{stage_name}"] = stage_count
+                if stage_count > 0:
+                    stage_diff = stat_diff[mask]
+                    stage_abs_sum = stage_diff.abs().sum().item()
+                    stage_sq_sum = (stage_diff ** 2).sum().item()
+                    metrics[f"action_mse_{stage_name}"] = stage_sq_sum / (stage_count * 4)
+                    metrics[f"action_mae_{stage_name}"] = stage_abs_sum / (stage_count * 4)
+                    metrics[f"action_rmse_{stage_name}"] = math.sqrt(
+                        metrics[f"action_mse_{stage_name}"]
+                    )
                 else:
-                    metrics[f"action_mse_{stage_name}"] = 0.0
-                    metrics[f"action_mae_{stage_name}"] = 0.0
-                    metrics[f"action_count_{stage_name}"] = 0
+                    metrics[f"action_mse_{stage_name}"] = None
+                    metrics[f"action_mae_{stage_name}"] = None
+                    metrics[f"action_rmse_{stage_name}"] = None
+
+        valid_pred = pred_action[not_done]
+        valid_gt = gt_action[not_done]
+
+        # First-step versus regular-step wrapped-yaw diagnostics.
+        valid_steps = step_ids.view(-1)[not_done] if step_ids is not None else None
+        for label, mask in (
+            ("first", valid_steps == 0 if valid_steps is not None else None),
+            ("regular", valid_steps != 0 if valid_steps is not None else None),
+        ):
+            count = int(mask.sum().item()) if mask is not None else 0
+            yaw_abs_sum = stat_diff[mask, 3].abs().sum().item() if count else 0.0
+            yaw_sq_sum = (stat_diff[mask, 3] ** 2).sum().item() if count else 0.0
+            metrics[f"dyaw_count_{label}"] = count
+            metrics[f"dyaw_mae_{label}"] = yaw_abs_sum / count if count else None
+            metrics[f"dyaw_mse_{label}"] = yaw_sq_sum / count if count else None
+            metrics[f"dyaw_rmse_{label}"] = (
+                math.sqrt(yaw_sq_sum / count) if count else None
+            )
+
+        wrapped_pred_yaw = wrap_angle_diff(valid_pred[:, 3])
+        wrapped_gt_yaw = wrap_angle_diff(valid_gt[:, 3])
+        pred_rare = wrapped_pred_yaw.abs() >= float(rare_yaw_threshold)
+        gt_rare = wrapped_gt_yaw.abs() >= float(rare_yaw_threshold)
+        metrics.update(_binary_counts(pred_rare, gt_rare, "rare_yaw"))
+        _derive_binary_metrics(metrics, "rare_yaw")
+
+        pred_dz_class = _dz_classes(valid_pred[:, 2], float(dz_threshold))
+        gt_dz_class = _dz_classes(valid_gt[:, 2], float(dz_threshold))
+        _add_dz_classification(metrics, pred_dz_class, gt_dz_class)
+
+        tail_mask = None
+        if dz_tail_threshold is not None:
+            tail_mask = valid_gt[:, 2].abs() >= float(dz_tail_threshold)
+        tail_count = int(tail_mask.sum().item()) if tail_mask is not None else 0
+        tail_abs_sum = stat_diff[tail_mask, 2].abs().sum().item() if tail_count else 0.0
+        tail_sq_sum = (stat_diff[tail_mask, 2] ** 2).sum().item() if tail_count else 0.0
+        metrics["dz_tail_count"] = tail_count
+        metrics["dz_tail_mae"] = tail_abs_sum / tail_count if tail_count else None
+        metrics["dz_tail_mse"] = tail_sq_sum / tail_count if tail_count else None
+        metrics["dz_tail_rmse"] = math.sqrt(tail_sq_sum / tail_count) if tail_count else None
     else:
-        for key in [
-            "action_mse", "action_mae", "dx_mse", "dy_mse", "dz_mse",
-            "dyaw_mse", "dx_mae", "dy_mae", "dz_mae", "dyaw_mae",
-            "horizontal_mse", "vertical_mse",
-        ]:
-            metrics[key] = 0.0
+        for name in dim_names:
+            for suffix in ("mae", "mse", "rmse"):
+                metrics[f"{name}_{suffix}"] = None
+        for key in ("action_mse", "action_mae", "action_rmse", "horizontal_mse", "vertical_mse"):
+            metrics[key] = None
         for stage_name in STAGE2NAME.values():
-            metrics[f"action_mse_{stage_name}"] = 0.0
-            metrics[f"action_mae_{stage_name}"] = 0.0
+            metrics[f"action_mse_{stage_name}"] = None
+            metrics[f"action_mae_{stage_name}"] = None
+            metrics[f"action_rmse_{stage_name}"] = None
             metrics[f"action_count_{stage_name}"] = 0
+        for label in ("first", "regular"):
+            metrics[f"dyaw_count_{label}"] = 0
+            for suffix in ("mae", "mse", "rmse"):
+                metrics[f"dyaw_{suffix}_{label}"] = None
+        metrics.update(_binary_counts(torch.zeros(0, dtype=torch.bool), torch.zeros(0, dtype=torch.bool), "rare_yaw"))
+        _derive_binary_metrics(metrics, "rare_yaw")
+        _add_dz_classification(metrics, torch.zeros(0, dtype=torch.long), torch.zeros(0, dtype=torch.long))
+        metrics.update({
+            "dz_tail_count": 0, "dz_tail_mae": None,
+            "dz_tail_mse": None, "dz_tail_rmse": None,
+        })
 
     if stop_logit is not None and gt_done is not None:
         stop_prob = torch.sigmoid(stop_logit).view(-1)
@@ -127,36 +203,209 @@ def compute_metrics(
         metrics["stop_fp"] = fp
         metrics["stop_fn"] = fn
         metrics["stop_tn"] = tn
+        metrics["num_stop_samples"] = total
 
     metrics["num_samples"] = pred_action.size(0)
     metrics["num_action_samples"] = action_count
     return metrics
 
 
+def _binary_counts(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    prefix: str,
+) -> Dict[str, int]:
+    prediction = prediction.bool()
+    target = target.bool()
+    return {
+        f"{prefix}_tp": int((prediction & target).sum().item()),
+        f"{prefix}_fp": int((prediction & ~target).sum().item()),
+        f"{prefix}_fn": int((~prediction & target).sum().item()),
+        f"{prefix}_tn": int((~prediction & ~target).sum().item()),
+    }
+
+
+def _derive_binary_metrics(metrics: Dict[str, Any], prefix: str) -> None:
+    tp = int(metrics[f"{prefix}_tp"])
+    fp = int(metrics[f"{prefix}_fp"])
+    fn = int(metrics[f"{prefix}_fn"])
+    total = tp + fp + fn + int(metrics[f"{prefix}_tn"])
+    if total == 0:
+        metrics[f"{prefix}_precision"] = None
+        metrics[f"{prefix}_recall"] = None
+        metrics[f"{prefix}_f1"] = None
+        metrics[f"{prefix}_support"] = 0
+        return
+    precision = tp / max(tp + fp, 1)
+    recall = tp / max(tp + fn, 1)
+    metrics[f"{prefix}_precision"] = precision
+    metrics[f"{prefix}_recall"] = recall
+    metrics[f"{prefix}_f1"] = 2 * precision * recall / max(precision + recall, 1e-8)
+    metrics[f"{prefix}_support"] = tp + fn
+
+
+def _dz_classes(dz: torch.Tensor, threshold: float) -> torch.Tensor:
+    result = torch.ones_like(dz, dtype=torch.long)
+    result = torch.where(dz < -threshold, torch.zeros_like(result), result)
+    return torch.where(dz > threshold, torch.full_like(result, 2), result)
+
+
+def _add_dz_classification(
+    metrics: Dict[str, Any],
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+) -> None:
+    names = ("ascend", "level", "descend")
+    f1_values = []
+    for class_id, name in enumerate(names):
+        pred_pos = prediction == class_id
+        gt_pos = target == class_id
+        counts = _binary_counts(pred_pos, gt_pos, f"dz_{name}")
+        metrics.update(counts)
+        _derive_binary_metrics(metrics, f"dz_{name}")
+        f1_values.append(metrics[f"dz_{name}_f1"])
+    metrics["dz_macro_f1"] = (
+        sum(f1_values) / len(f1_values)
+        if prediction.numel() else None
+    )
+
+
 def aggregate_epoch_metrics(
-    batch_metrics_list: List[Dict[str, float]],
-) -> Dict[str, float]:
-    """Aggregate batch-level action metrics into epoch-level metrics."""
+    batch_metrics_list: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Aggregate sufficient statistics, never averages of batch averages."""
     if not batch_metrics_list:
         return {}
 
     total_samples = sum(m.get("num_samples", 0) for m in batch_metrics_list)
-    if total_samples == 0:
-        keys = {k for m in batch_metrics_list for k in m if k != "num_samples"}
-        return {
-            k: sum(m.get(k, 0.0) for m in batch_metrics_list) / len(batch_metrics_list)
-            for k in keys
-        }
+    total_action_samples = sum(m.get("num_action_samples", 0) for m in batch_metrics_list)
+    result: Dict[str, Any] = {
+        "num_samples": total_samples,
+        "num_action_samples": total_action_samples,
+    }
 
-    result: Dict[str, float] = {}
-    for metrics in batch_metrics_list:
-        weight = metrics.get("num_samples", 0) / max(total_samples, 1)
-        for key, value in metrics.items():
-            if key == "num_samples":
-                continue
-            result[key] = result.get(key, 0.0) + value * weight
+    dim_names = ("dx", "dy", "dz", "dyaw")
+    for name in dim_names:
+        abs_sum = sum(
+            float(m.get(f"{name}_mae") or 0.0)
+            * int(m.get("num_action_samples", 0) or 0)
+            for m in batch_metrics_list
+        )
+        sq_sum = sum(
+            float(m.get(f"{name}_mse") or 0.0)
+            * int(m.get("num_action_samples", 0) or 0)
+            for m in batch_metrics_list
+        )
+        result[f"{name}_mae"] = abs_sum / total_action_samples if total_action_samples else None
+        result[f"{name}_mse"] = sq_sum / total_action_samples if total_action_samples else None
+        result[f"{name}_rmse"] = math.sqrt(result[f"{name}_mse"]) if total_action_samples else None
+    if total_action_samples:
+        result["action_mae"] = sum(result[f"{d}_mae"] for d in dim_names) / 4
+        result["action_mse"] = sum(result[f"{d}_mse"] for d in dim_names) / 4
+        result["action_rmse"] = math.sqrt(result["action_mse"])
+        result["horizontal_mse"] = result["dx_mse"] + result["dy_mse"]
+        result["vertical_mse"] = result["dz_mse"]
+    else:
+        for key in ("action_mae", "action_mse", "action_rmse", "horizontal_mse", "vertical_mse"):
+            result[key] = None
 
-    result["num_samples"] = total_samples
+    for stage_name in STAGE2NAME.values():
+        count_key = f"action_count_{stage_name}"
+        result[count_key] = sum(int(m.get(count_key, 0) or 0) for m in batch_metrics_list)
+        abs_sum = sum(
+            float(m.get(f"action_mae_{stage_name}") or 0.0)
+            * int(m.get(count_key, 0) or 0) * 4
+            for m in batch_metrics_list
+        )
+        sq_sum = sum(
+            float(m.get(f"action_mse_{stage_name}") or 0.0)
+            * int(m.get(count_key, 0) or 0) * 4
+            for m in batch_metrics_list
+        )
+        denom = result[count_key] * 4
+        result[f"action_mae_{stage_name}"] = abs_sum / denom if denom else None
+        result[f"action_mse_{stage_name}"] = sq_sum / denom if denom else None
+        result[f"action_rmse_{stage_name}"] = math.sqrt(sq_sum / denom) if denom else None
+
+    for label in ("first", "regular"):
+        count = sum(int(m.get(f"dyaw_count_{label}", 0) or 0) for m in batch_metrics_list)
+        abs_sum = sum(
+            float(m.get(f"dyaw_mae_{label}") or 0.0)
+            * int(m.get(f"dyaw_count_{label}", 0) or 0)
+            for m in batch_metrics_list
+        )
+        sq_sum = sum(
+            float(m.get(f"dyaw_mse_{label}") or 0.0)
+            * int(m.get(f"dyaw_count_{label}", 0) or 0)
+            for m in batch_metrics_list
+        )
+        result[f"dyaw_count_{label}"] = count
+        result[f"dyaw_mae_{label}"] = abs_sum / count if count else None
+        result[f"dyaw_mse_{label}"] = sq_sum / count if count else None
+        result[f"dyaw_rmse_{label}"] = math.sqrt(sq_sum / count) if count else None
+
+    for prefix in ("rare_yaw", "dz_ascend", "dz_level", "dz_descend"):
+        for suffix in ("tp", "fp", "fn", "tn"):
+            key = f"{prefix}_{suffix}"
+            result[key] = sum(int(m.get(key, 0) or 0) for m in batch_metrics_list)
+        _derive_binary_metrics(result, prefix)
+    dz_f1_values = [
+        result[f"dz_{name}_f1"] for name in ("ascend", "level", "descend")
+    ]
+    result["dz_macro_f1"] = (
+        sum(dz_f1_values) / 3
+        if total_action_samples and all(value is not None for value in dz_f1_values)
+        else None
+    )
+
+    tail_count = sum(int(m.get("dz_tail_count", 0) or 0) for m in batch_metrics_list)
+    tail_abs_sum = sum(
+        float(m.get("dz_tail_mae") or 0.0)
+        * int(m.get("dz_tail_count", 0) or 0)
+        for m in batch_metrics_list
+    )
+    tail_sq_sum = sum(
+        float(m.get("dz_tail_mse") or 0.0)
+        * int(m.get("dz_tail_count", 0) or 0)
+        for m in batch_metrics_list
+    )
+    result.update({
+        "dz_tail_count": tail_count,
+        "dz_tail_mae": tail_abs_sum / tail_count if tail_count else None,
+        "dz_tail_mse": tail_sq_sum / tail_count if tail_count else None,
+        "dz_tail_rmse": math.sqrt(tail_sq_sum / tail_count) if tail_count else None,
+    })
+
+    stop_count = sum(int(m.get("num_stop_samples", 0) or 0) for m in batch_metrics_list)
+    stop_counts = {
+        key: sum(int(m.get(key, 0) or 0) for m in batch_metrics_list)
+        for key in ("stop_tp", "stop_fp", "stop_fn", "stop_tn")
+    }
+    if stop_count > 0:
+        tp = stop_counts["stop_tp"]
+        fp = stop_counts["stop_fp"]
+        fn = stop_counts["stop_fn"]
+        tn = stop_counts["stop_tn"]
+        precision = tp / max(tp + fp, 1)
+        recall = tp / max(tp + fn, 1)
+        result.update({
+            "stop_accuracy": (tp + tn) / stop_count,
+            "stop_precision": precision,
+            "stop_recall": recall,
+            "stop_f1": 2 * precision * recall / max(precision + recall, 1e-8),
+            **stop_counts,
+            "num_stop_samples": stop_count,
+        })
+    else:
+        result.update({
+            "stop_accuracy": None,
+            "stop_precision": None,
+            "stop_recall": None,
+            "stop_f1": None,
+            **stop_counts,
+            "num_stop_samples": 0,
+        })
+
     return result
 
 

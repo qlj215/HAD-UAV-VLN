@@ -82,7 +82,11 @@ FUSION_REGISTRY = {
 
 
 class TargetYawEncoder(nn.Module):
-    """Encode target bearing [sin(relative_yaw), cos(relative_yaw)]."""
+    """Encode a local-yaw feature [sin(yaw), cos(yaw)].
+
+    The class name is retained for legacy checkpoint compatibility. Formal
+    observable runs provide start-relative odometry yaw, not target bearing.
+    """
 
     def __init__(self, hidden_dim: int = 64, dropout: float = 0.1):
         super().__init__()
@@ -172,9 +176,13 @@ class HADVLNModel(nn.Module):
         fusion_type: str = "height_cond",
         fusion_hidden_dim: int = 512,
         fusion_num_heads: int = 8,
+        fusion_reliability_mode: str = "legacy",
         # Policy
         policy_hidden_dims: Tuple[int, ...] = (512, 256),
         policy_yaw_strategy: str = "baseline",
+        policy_dropout: Optional[float] = None,
+        policy_dz_strategy: str = "baseline",
+        dz_direction_threshold: float = 0.25,
         use_progress_monitor: bool = False,
         use_dz_sign_aux: bool = False,
         dz_sign_hidden_dim: int = 128,
@@ -249,6 +257,7 @@ class HADVLNModel(nn.Module):
         )
         if fusion_type == "height_cond":
             fusion_kwargs["fixed_gate_alpha"] = fixed_gate_alpha
+            fusion_kwargs["reliability_mode"] = fusion_reliability_mode
         if fusion_type == "cross_attn":
             fusion_kwargs["num_heads"] = fusion_num_heads
 
@@ -261,8 +270,10 @@ class HADVLNModel(nn.Module):
             use_progress_monitor=use_progress_monitor,
             use_dz_sign_aux=use_dz_sign_aux,
             dz_sign_hidden_dim=dz_sign_hidden_dim,
-            dropout=dropout,
+            dropout=dropout if policy_dropout is None else float(policy_dropout),
             yaw_strategy=policy_yaw_strategy,
+            dz_strategy=policy_dz_strategy,
+            dz_direction_threshold=dz_direction_threshold,
         )
 
         # 暴露关键维度 (方便外部调参)
@@ -308,6 +319,20 @@ class HADVLNModel(nn.Module):
         }
         return fused, fusion_aux, feature_dict
 
+    def _attach_fusion_outputs(
+        self,
+        outputs: Dict[str, torch.Tensor],
+        fusion_aux,
+    ) -> None:
+        """Expose fusion diagnostics while preserving the legacy tuple API."""
+        if self.fusion_type == "height_cond":
+            if isinstance(fusion_aux, dict):
+                outputs.update(fusion_aux)
+            else:
+                outputs["gate_weight"] = fusion_aux
+        elif self.fusion_type == "cross_attn":
+            outputs["attn_weight"] = fusion_aux
+
     def forward(
         self,
         front_image: torch.Tensor,
@@ -340,11 +365,7 @@ class HADVLNModel(nn.Module):
 
         outputs = self.policy(fused, step_ids=step_ids)
 
-        if self.fusion_type == "height_cond":
-            outputs["gate_weight"] = fusion_aux
-
-        elif self.fusion_type == "cross_attn":
-            outputs["attn_weight"] = fusion_aux
+        self._attach_fusion_outputs(outputs, fusion_aux)
 
         # 附加中间特征 (供分析和辅助损失使用)
         if return_features:
@@ -394,6 +415,14 @@ class HADVLNModel(nn.Module):
         if "attn_weight" in outputs:
             result["attn_weight"] = outputs["attn_weight"]
 
+        for key in (
+            "reliability_action_mean", "reliability_logvar",
+            "dz_direction_logits", "dz_direction_prob", "dz_magnitude",
+            "dz_expected", "yaw_init", "yaw_normal", "yaw_gate",
+        ):
+            if key in outputs:
+                result[key] = outputs[key]
+
         if was_training:
             self.train()
 
@@ -403,13 +432,10 @@ class HADVLNModel(nn.Module):
 class HADVLNModelwithPosition(HADVLNModel):
     """HAD model variant with navigation state features.
 
-    Extra inputs:
-      - target_yaw_feat: [sin(relative_yaw), cos(relative_yaw)]
-      - uav_position_feat: current UAV local xyz in the trajectory-start body
-        frame, normalized by the dataset.
-
-    target_position is consumed only by the dataset to derive target_yaw_feat;
-    target coordinates and target distance are not fed to the model.
+    The Python argument names are retained for legacy checkpoint/API
+    compatibility. Formal observable runs bind them to ``local_yaw_feat`` and
+    ``local_position_feat``: start-relative onboard odometry only, with no
+    target coordinate, endpoint or target-distance input.
     """
 
     def __init__(
@@ -466,10 +492,7 @@ class HADVLNModelwithPosition(HADVLNModel):
         )
         outputs = self.policy(fused_with_position, step_ids=step_ids)
 
-        if self.fusion_type == "height_cond":
-            outputs["gate_weight"] = fusion_aux
-        elif self.fusion_type == "cross_attn":
-            outputs["attn_weight"] = fusion_aux
+        self._attach_fusion_outputs(outputs, fusion_aux)
 
         if return_features:
             outputs.update(feature_dict)
@@ -522,6 +545,13 @@ class HADVLNModelwithPosition(HADVLNModel):
             result["gate_weight"] = outputs["gate_weight"]
         if "attn_weight" in outputs:
             result["attn_weight"] = outputs["attn_weight"]
+        for key in (
+            "reliability_action_mean", "reliability_logvar",
+            "dz_direction_logits", "dz_direction_prob", "dz_magnitude",
+            "dz_expected", "yaw_init", "yaw_normal", "yaw_gate",
+        ):
+            if key in outputs:
+                result[key] = outputs[key]
         if was_training:
             self.train()
         return result

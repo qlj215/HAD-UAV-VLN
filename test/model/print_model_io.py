@@ -4,7 +4,7 @@ Print model input/output shapes, sample values, and meanings.
 Run from the project root:
 
     source .venv/bin/activate
-    python test/print_model_io.py
+    python test/model/print_model_io.py
 """
 
 import json
@@ -18,7 +18,7 @@ import torch
 from PIL import Image
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -37,8 +37,7 @@ def resolve_data_root() -> Path:
     candidates.extend(
         [
             PROJECT_ROOT / "data" / "processed",
-            Path("/root/autodl-tmp/TravelUAVProcessedData"),
-            Path("/root/autodl-tmp/TravelUAVProcessedData_mini"),
+            PROJECT_ROOT / "data" / "processed_target_aligned",
         ]
     )
     for candidate in candidates:

@@ -8,8 +8,8 @@ This converter expects each trajectory directory to contain an official-style
 uses:
 - ``merged_data.conversations[0].value`` as the navigation instruction;
 - ``merged_data.index`` to align front/down images with trajectory entries;
-- ``merged_data.trajectory`` for target-aligned local action labels;
-- ``merged_data.trajectory_raw`` for world pose and altitude.
+- ``merged_data.trajectory`` for the legacy target-aligned representation;
+- ``merged_data.trajectory_raw`` for observable odometry state and action labels.
 
 Recommended rebuild after regenerating merged files:
 
@@ -24,10 +24,14 @@ import json
 import math
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 LOW_ALT_THRESHOLD = 10.0
 MID_ALT_THRESHOLD = 30.0
+LEGACY_COORD_FRAME = "target_aligned_local"
+OBSERVABLE_COORD_FRAME = "current_yaw_local_ned"
+SUPPORTED_COORD_FRAMES = (LEGACY_COORD_FRAME, OBSERVABLE_COORD_FRAME)
+SPLIT_NAMES = ("train", "val_seen", "val_unseen", "test")
 
 
 def get_height_stage(altitude: float) -> str:
@@ -130,6 +134,43 @@ def wrap_angle_rad(angle: float) -> float:
     return math.atan2(math.sin(float(angle)), math.cos(float(angle)))
 
 
+def yaw_local_vector(vector_xyz: Sequence[float], yaw: float) -> List[float]:
+    """Rotate an NED world displacement into a yaw-only local frame.
+
+    AirSim uses NED coordinates, so z is deliberately left unchanged: positive
+    local z means descending.  The xy operation is ``Rz(yaw).T @ vector``.
+    """
+    if len(vector_xyz) < 3:
+        raise ValueError(f"Expected xyz vector, got {vector_xyz!r}")
+    cos_yaw = math.cos(float(yaw))
+    sin_yaw = math.sin(float(yaw))
+    x, y, z = (float(vector_xyz[0]), float(vector_xyz[1]), float(vector_xyz[2]))
+    return [
+        cos_yaw * x + sin_yaw * y,
+        -sin_yaw * x + cos_yaw * y,
+        z,
+    ]
+
+
+def current_yaw_local_action(current_pose: Sequence[float], next_pose: Sequence[float]) -> List[float]:
+    """Return ``[dx, dy, dz, dyaw]`` using only consecutive onboard poses."""
+    if len(current_pose) < 6 or len(next_pose) < 6:
+        raise ValueError("Both poses must contain xyz and roll/pitch/yaw")
+    world_delta = [float(next_pose[i]) - float(current_pose[i]) for i in range(3)]
+    local_delta = yaw_local_vector(world_delta, float(current_pose[5]))
+    return [*local_delta, wrap_angle_rad(float(next_pose[5]) - float(current_pose[5]))]
+
+
+def start_yaw_local_state(pose: Sequence[float], start_pose: Sequence[float]) -> Tuple[List[float], float]:
+    """Return deployable start-relative yaw-only odometry state."""
+    if len(pose) < 6 or len(start_pose) < 6:
+        raise ValueError("Both poses must contain xyz and roll/pitch/yaw")
+    world_delta = [float(pose[i]) - float(start_pose[i]) for i in range(3)]
+    local_position = yaw_local_vector(world_delta, float(start_pose[5]))
+    local_yaw = wrap_angle_rad(float(pose[5]) - float(start_pose[5]))
+    return local_position, local_yaw
+
+
 def transform_point(point: List[float], basis_cols: List[List[float]]) -> List[float]:
     """Project a start-local xyz point into the target-aligned local frame."""
     return [
@@ -151,7 +192,12 @@ def convert_traveluav_trajectory(
     out_image_dir: Path,
     copy_images: bool = True,
     merged_filename: str = "merged_data.json",
+    coord_frame: str = LEGACY_COORD_FRAME,
 ) -> List[dict]:
+    if coord_frame not in SUPPORTED_COORD_FRAMES:
+        raise ValueError(
+            f"Unsupported coord_frame={coord_frame!r}; expected one of {SUPPORTED_COORD_FRAMES}"
+        )
     traj_id = traj_dir.name
     merged_path = traj_dir / merged_filename
     mark_path = traj_dir / "mark.json"
@@ -162,25 +208,30 @@ def convert_traveluav_trajectory(
     merged = load_json(merged_path)
 
     instruction, instruction_source = instruction_from_merged(merged, obj_desc)
-    target_position = mark["target"]["position"]
-    start_position = mark.get("start") or (merged.get("trajectory_raw") or [{}])[0].get("position")
-    if not start_position:
-        print(f"  [WARN] {traj_id}: missing start position, skipped")
-        return []
-
     trajectory = merged.get("trajectory", [])
     indices = merged.get("index") or list(range(len(trajectory)))
     raw_states = merged.get("trajectory_raw") or []
+    target_position = mark["target"]["position"] if coord_frame == LEGACY_COORD_FRAME else None
+    if coord_frame == OBSERVABLE_COORD_FRAME:
+        start_position = (raw_states or [{}])[0].get("position")
+    else:
+        start_position = mark.get("start") or (raw_states or [{}])[0].get("position")
+    if not start_position:
+        print(f"  [WARN] {traj_id}: missing start position, skipped")
+        return []
     if not trajectory:
         print(f"  [WARN] {traj_id}: empty trajectory, skipped")
         return []
     if len(indices) != len(trajectory):
         print(f"  [WARN] {traj_id}: index/trajectory length mismatch ({len(indices)} vs {len(trajectory)}), using min length")
-    final_tdata = trajectory[-1]
-    target_rot, target_align_yaw = rotation_matrix_from_vector(
-        float(final_tdata[0]),
-        float(final_tdata[1]),
-    )
+    if coord_frame == LEGACY_COORD_FRAME:
+        final_tdata = trajectory[-1]
+        target_rot, target_align_yaw = rotation_matrix_from_vector(
+            float(final_tdata[0]),
+            float(final_tdata[1]),
+        )
+    else:
+        target_rot, target_align_yaw = None, None
 
     front_dir = traj_dir / "frontcamera"
     down_dir = traj_dir / "downcamera"
@@ -199,12 +250,43 @@ def convert_traveluav_trajectory(
             print(f"  [WARN] {traj_id}: missing image for frame {frame_idx:06d}, skipped frame")
             continue
         raw_state = raw_states[i] if i < len(raw_states) else None
+        if coord_frame == OBSERVABLE_COORD_FRAME:
+            if (
+                not isinstance(raw_state, Mapping)
+                or not isinstance(raw_state.get("position"), list)
+                or len(raw_state["position"]) != 3
+                or not isinstance(raw_state.get("orientation"), list)
+                or len(raw_state["orientation"]) != 4
+            ):
+                raise ValueError(
+                    f"{scene_id}/{traj_id}: observable conversion requires complete "
+                    f"trajectory_raw position/orientation for aligned frame index {i}"
+                )
         aligned.append((i, frame_idx, trajectory[i], raw_state, front_src, down_src))
 
     if len(aligned) < 2:
         print(f"  [WARN] {traj_id}: fewer than 2 aligned frames, skipped")
         return []
 
+    poses: List[List[float]] = []
+    altitudes: List[float] = []
+    for _, _, tdata, raw_state, _, _ in aligned:
+        cum_dx, cum_dy, cum_dz = (float(tdata[0]), float(tdata[1]), float(tdata[2]))
+        roll_delta = float(tdata[3]) if len(tdata) > 3 else 0.0
+        pitch_delta = float(tdata[4]) if len(tdata) > 4 else 0.0
+        yaw_delta = float(tdata[5]) if len(tdata) > 5 else 0.0
+        fallback_xyz = [
+            float(start_position[0]) + cum_dx,
+            float(start_position[1]) + cum_dy,
+            float(start_position[2]) + cum_dz,
+        ]
+        pose, altitude = raw_pose_from_state(
+            raw_state, fallback_xyz, [roll_delta, pitch_delta, yaw_delta]
+        )
+        poses.append(pose)
+        altitudes.append(altitude)
+
+    start_pose = poses[0]
     samples = []
     for seq_idx, (orig_idx, frame_idx, tdata, raw_state, front_src, down_src) in enumerate(aligned):
         cum_dx, cum_dy, cum_dz = float(tdata[0]), float(tdata[1]), float(tdata[2])
@@ -212,18 +294,20 @@ def convert_traveluav_trajectory(
         pitch_delta = float(tdata[4]) if len(tdata) > 4 else 0.0
         yaw_delta = float(tdata[5]) if len(tdata) > 5 else 0.0
         curr_start_local = [cum_dx, cum_dy, cum_dz]
-        curr_target_local = transform_point(curr_start_local, target_rot)
-        curr_target_yaw = wrap_angle_rad(yaw_delta - target_align_yaw)
-
-        fallback_xyz = [
-            float(start_position[0]) + cum_dx,
-            float(start_position[1]) + cum_dy,
-            float(start_position[2]) + cum_dz,
-        ]
-        pose, altitude = raw_pose_from_state(raw_state, fallback_xyz, [roll_delta, pitch_delta, yaw_delta])
+        pose = poses[seq_idx]
+        altitude = altitudes[seq_idx]
         height_stage = get_height_stage(altitude)
 
-        if seq_idx < len(aligned) - 1:
+        if coord_frame == LEGACY_COORD_FRAME:
+            assert target_rot is not None and target_align_yaw is not None
+            curr_target_local = transform_point(curr_start_local, target_rot)
+            curr_target_yaw = wrap_angle_rad(yaw_delta - target_align_yaw)
+        else:
+            curr_target_local = None
+            curr_target_yaw = None
+            local_position, local_yaw = start_yaw_local_state(pose, start_pose)
+
+        if seq_idx < len(aligned) - 1 and coord_frame == LEGACY_COORD_FRAME:
             next_tdata = aligned[seq_idx + 1][2]
             next_start_local = [
                 float(next_tdata[0]),
@@ -240,6 +324,9 @@ def convert_traveluav_trajectory(
                 wrap_angle_rad(next_target_yaw - curr_target_yaw),
             ]
             done = False
+        elif seq_idx < len(aligned) - 1:
+            action = current_yaw_local_action(pose, poses[seq_idx + 1])
+            done = False
         else:
             action = [0.0, 0.0, 0.0, 0.0]
             done = True
@@ -248,12 +335,13 @@ def convert_traveluav_trajectory(
         front_dst = out_front_dir / f"{sample_id}.png"
         down_dst = out_down_dir / f"{sample_id}.png"
         if copy_images:
-            if not front_dst.exists():
-                shutil.copy2(front_src, front_dst)
-            if not down_dst.exists():
-                shutil.copy2(down_src, down_dst)
+            # Overwrite deterministically. Reusing an output directory after a
+            # raw-data correction must never retain stale frames under the same
+            # sample id.
+            shutil.copy2(front_src, front_dst)
+            shutil.copy2(down_src, down_dst)
 
-        samples.append({
+        sample = {
             "sample_id": sample_id,
             "scene_id": scene_id,
             "trajectory_id": traj_id,
@@ -267,14 +355,26 @@ def convert_traveluav_trajectory(
             "altitude": altitude,
             "height_stage": height_stage,
             "action": action,
-            "target_position": target_position,
-            "target_local_position": curr_target_local,
-            "target_local_yaw": curr_target_yaw,
-            "target_align_yaw": target_align_yaw,
-            "coord_frame": "target_aligned_local",
+            "coord_frame": coord_frame,
             "done": done,
             "merged_file": merged_filename,
-        })
+        }
+        if coord_frame == LEGACY_COORD_FRAME:
+            sample.update({
+                "target_position": target_position,
+                "target_local_position": curr_target_local,
+                "target_local_yaw": curr_target_yaw,
+                "target_align_yaw": target_align_yaw,
+            })
+        else:
+            # These are onboard odometry quantities.  No demonstration endpoint
+            # or target-derived numeric field is emitted in the formal record.
+            sample.update({
+                "state_frame": "start_yaw_local_ned",
+                "local_position": local_position,
+                "local_yaw": local_yaw,
+            })
+        samples.append(sample)
 
     return samples
 
@@ -298,6 +398,76 @@ def collect_trajectories(raw_dir: Path, merged_filename: str = "merged_data.json
     return scene_trajs
 
 
+def _trajectory_ref(value: Any) -> Tuple[str, str]:
+    """Parse one canonical split-manifest trajectory reference."""
+    if isinstance(value, Mapping):
+        scene_id = str(value.get("scene_id", "")).strip()
+        trajectory_id = str(value.get("trajectory_id", "")).strip()
+    elif isinstance(value, str) and "/" in value:
+        scene_id, trajectory_id = (part.strip() for part in value.split("/", 1))
+    else:
+        raise ValueError(
+            "Each split-manifest item must be {scene_id, trajectory_id} "
+            f"or 'scene_id/trajectory_id', got {value!r}"
+        )
+    if not scene_id or not trajectory_id:
+        raise ValueError(f"Invalid split-manifest trajectory reference: {value!r}")
+    return scene_id, trajectory_id
+
+
+def load_split_manifest(path: Path) -> Dict[str, List[Tuple[str, str]]]:
+    """Load the version-1 formal split manifest.
+
+    Canonical schema::
+
+        {"version": 1, "splits": {
+          "train": [{"scene_id": "...", "trajectory_id": "..."}],
+          "val_seen": [...], "val_unseen": [...], "test": [...]}}
+    """
+    payload = load_json(path)
+    if int(payload.get("version", 0)) != 1 or not isinstance(payload.get("splits"), Mapping):
+        raise ValueError(f"Unsupported split manifest schema: {path}")
+    unknown_splits = set(payload["splits"]) - set(SPLIT_NAMES)
+    if unknown_splits:
+        raise ValueError(f"Unknown split names in {path}: {sorted(unknown_splits)}")
+    parsed: Dict[str, List[Tuple[str, str]]] = {split: [] for split in SPLIT_NAMES}
+    owner: Dict[Tuple[str, str], str] = {}
+    for split in SPLIT_NAMES:
+        values = payload["splits"].get(split, [])
+        if not isinstance(values, list):
+            raise ValueError(f"split {split!r} must be a list in {path}")
+        for value in values:
+            key = _trajectory_ref(value)
+            if key in owner:
+                raise ValueError(
+                    f"Trajectory {key[0]}/{key[1]} occurs in both "
+                    f"{owner[key]!r} and {split!r}"
+                )
+            owner[key] = split
+            parsed[split].append(key)
+    return parsed
+
+
+def split_manifest_payload(split_keys: Mapping[str, Sequence[Tuple[str, str]]]) -> dict:
+    return {
+        "version": 1,
+        "splits": {
+            split: [
+                {"scene_id": scene_id, "trajectory_id": trajectory_id}
+                for scene_id, trajectory_id in split_keys.get(split, [])
+            ]
+            for split in SPLIT_NAMES
+        },
+    }
+
+
+def write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2, allow_nan=False)
+        handle.write("\n")
+
+
 def convert_dataset(
     raw_dir: str,
     out_dir: str,
@@ -305,7 +475,13 @@ def convert_dataset(
     copy_images: bool = True,
     split_ratio: Optional[Tuple[float, float, float]] = None,
     merged_filename: str = "merged_data.json",
+    coord_frame: str = LEGACY_COORD_FRAME,
+    split_manifest: Optional[str] = None,
 ) -> None:
+    if coord_frame not in SUPPORTED_COORD_FRAMES:
+        raise ValueError(
+            f"Unsupported coord_frame={coord_frame!r}; expected one of {SUPPORTED_COORD_FRAMES}"
+        )
     raw_path = Path(raw_dir)
     out_path = Path(out_dir)
     out_image_dir = out_path / "images"
@@ -314,6 +490,9 @@ def convert_dataset(
     print(f"[INFO] raw dir: {raw_path}")
     print(f"[INFO] output dir: {out_path}")
     print(f"[INFO] merged file: {merged_filename}")
+    print(f"[INFO] coordinate frame: {coord_frame}")
+    if split_manifest:
+        print(f"[INFO] frozen split manifest: {Path(split_manifest).resolve()}")
 
     scene_trajs = collect_trajectories(raw_path, merged_filename=merged_filename)
     if not scene_trajs:
@@ -336,6 +515,7 @@ def convert_dataset(
                 out_image_dir=out_image_dir,
                 copy_images=copy_images,
                 merged_filename=merged_filename,
+                coord_frame=coord_frame,
             )
             if samples:
                 all_samples.extend(samples)
@@ -360,16 +540,48 @@ def convert_dataset(
     test_samples: List[dict] = []
 
     scene_to_trajs: Dict[str, List[Tuple[str, int, int]]] = {}
+    trajectory_samples: Dict[Tuple[str, str], List[dict]] = {}
     sample_offset = 0
     for scene_id, traj_id, count in scene_traj_counts:
         scene_to_trajs.setdefault(scene_id, []).append((traj_id, sample_offset, count))
+        trajectory_samples[(scene_id, traj_id)] = all_samples[sample_offset:sample_offset + count]
         sample_offset += count
 
     scene_ids = sorted(scene_to_trajs)
     test_scenes: List[str] = []
     val_unseen_scenes: List[str] = []
 
-    if len(scene_ids) >= 4:
+    selected_split_keys: Dict[str, List[Tuple[str, str]]] = {
+        split: [] for split in SPLIT_NAMES
+    }
+    if split_manifest:
+        selected_split_keys = load_split_manifest(Path(split_manifest).resolve())
+        requested = {
+            key for keys in selected_split_keys.values() for key in keys
+        }
+        available = set(trajectory_samples)
+        missing = sorted(requested - available)
+        unassigned = sorted(available - requested)
+        if missing:
+            raise ValueError(
+                "Split manifest references unavailable trajectories: "
+                + ", ".join(f"{scene}/{traj}" for scene, traj in missing[:20])
+            )
+        if unassigned:
+            raise ValueError(
+                "Split manifest does not assign all converted trajectories: "
+                + ", ".join(f"{scene}/{traj}" for scene, traj in unassigned[:20])
+            )
+        split_targets = {
+            "train": train_samples,
+            "val_seen": val_seen_samples,
+            "val_unseen": val_unseen_samples,
+            "test": test_samples,
+        }
+        for split in SPLIT_NAMES:
+            for key in selected_split_keys[split]:
+                split_targets[split].extend(trajectory_samples[key])
+    elif len(scene_ids) >= 4:
         n_test_scenes = max(1, round(len(scene_ids) * 0.1)) if len(scene_ids) >= 6 else 0
         n_test_scenes = min(n_test_scenes, max(0, len(scene_ids) - 2))
         remaining_for_seen_and_unseen = len(scene_ids) - n_test_scenes
@@ -390,25 +602,32 @@ def convert_dataset(
     else:
         seen_scenes = scene_ids
 
-    def extend_records(target: List[dict], records: List[Tuple[str, int, int]]) -> None:
+    def extend_records(
+        target: List[dict], records: List[Tuple[str, int, int]], split: str
+    ) -> None:
         for _, start, count in records:
             target.extend(all_samples[start:start + count])
+            sample = all_samples[start]
+            selected_split_keys[split].append(
+                (str(sample["scene_id"]), str(sample["trajectory_id"]))
+            )
 
-    for scene_id in seen_scenes:
-        records = scene_to_trajs[scene_id]
-        if len(records) == 1:
-            extend_records(train_samples, records)
-            print(f"  [WARN] {scene_id}: only 1 trajectory, cannot split val_seen")
-            continue
-        n_train = int(len(records) * train_ratio)
-        n_train = min(max(1, n_train), len(records) - 1)
-        extend_records(train_samples, records[:n_train])
-        extend_records(val_seen_samples, records[n_train:])
+    if not split_manifest:
+        for scene_id in seen_scenes:
+            records = scene_to_trajs[scene_id]
+            if len(records) == 1:
+                extend_records(train_samples, records, "train")
+                print(f"  [WARN] {scene_id}: only 1 trajectory, cannot split val_seen")
+                continue
+            n_train = int(len(records) * train_ratio)
+            n_train = min(max(1, n_train), len(records) - 1)
+            extend_records(train_samples, records[:n_train], "train")
+            extend_records(val_seen_samples, records[n_train:], "val_seen")
 
-    for scene_id in val_unseen_scenes:
-        extend_records(val_unseen_samples, scene_to_trajs[scene_id])
-    for scene_id in test_scenes:
-        extend_records(test_samples, scene_to_trajs[scene_id])
+        for scene_id in val_unseen_scenes:
+            extend_records(val_unseen_samples, scene_to_trajs[scene_id], "val_unseen")
+        for scene_id in test_scenes:
+            extend_records(test_samples, scene_to_trajs[scene_id], "test")
 
     out_path.mkdir(parents=True, exist_ok=True)
     write_jsonl(train_samples, out_path / "train.jsonl")
@@ -416,6 +635,7 @@ def convert_dataset(
     write_jsonl(val_seen_samples, out_path / "val_seen.jsonl")
     write_jsonl(val_unseen_samples, out_path / "val_unseen.jsonl")
     write_jsonl(test_samples, out_path / "test.jsonl")
+    write_json(out_path / "split_manifest.json", split_manifest_payload(selected_split_keys))
 
     train_scene_names = sorted({s["scene_id"] for s in train_samples})
     val_seen_scene_names = sorted({s["scene_id"] for s in val_seen_samples})
@@ -441,6 +661,17 @@ def main() -> None:
     parser.add_argument("--no_copy_images", action="store_true", help="Do not copy images")
     parser.add_argument("--train_ratio", type=float, default=0.7, help="Train trajectory ratio for seen scenes")
     parser.add_argument("--merged_filename", type=str, default="merged_data.json", help="Merged JSON filename in each trajectory dir")
+    parser.add_argument(
+        "--coord-frame", "--coord_frame",
+        choices=SUPPORTED_COORD_FRAMES,
+        default=LEGACY_COORD_FRAME,
+        help="Action/state coordinate contract; legacy default is retained",
+    )
+    parser.add_argument(
+        "--split-manifest", "--split_manifest",
+        default=None,
+        help="Version-1 trajectory membership manifest; all converted trajectories must be assigned",
+    )
     args = parser.parse_args()
 
     convert_dataset(
@@ -450,6 +681,8 @@ def main() -> None:
         copy_images=not args.no_copy_images,
         split_ratio=(args.train_ratio, max(0.0, 1.0 - args.train_ratio), 0.2),
         merged_filename=args.merged_filename,
+        coord_frame=args.coord_frame,
+        split_manifest=args.split_manifest,
     )
 
 

@@ -128,14 +128,17 @@ def default_tokenizer(text: str, max_len: int = 80) -> List[int]:
     return stable_hash_tokenizer(text, max_len=max_len, vocab_size=5000)
 
 
-def target_relative_yaw_feature(sample: dict) -> List[float]:
-    """Return target/yaw feature without exposing target xyz.
+def local_yaw_feature(sample: dict) -> List[float]:
+    """Return the configured local-yaw feature as ``[sin(yaw), cos(yaw)]``.
 
-    New target-aligned JSONL uses ``target_local_yaw``: current UAV yaw in the
-    target-aligned local frame where +x points to the trajectory endpoint. For
-    backward compatibility with older JSONL, fall back to the previous feature:
-    target bearing in the current UAV yaw frame.
+    Observable records store current yaw relative to the trajectory-start yaw.
+    Legacy records retain the historical target-aligned and target-bearing
+    fallbacks so existing processed data and checkpoints keep loading.
     """
+    if "local_yaw" in sample:
+        yaw = float(sample.get("local_yaw") or 0.0)
+        return [math.sin(yaw), math.cos(yaw)]
+
     if "target_local_yaw" in sample:
         yaw = float(sample.get("target_local_yaw") or 0.0)
         return [math.sin(yaw), math.cos(yaw)]
@@ -155,6 +158,11 @@ def target_relative_yaw_feature(sample: dict) -> List[float]:
     body_y = -sin_yaw * dx + cos_yaw * dy
     rel_yaw = math.atan2(body_y, body_x)
     return [math.sin(rel_yaw), math.cos(rel_yaw)]
+
+
+def target_relative_yaw_feature(sample: dict) -> List[float]:
+    """Backward-compatible alias for :func:`local_yaw_feature`."""
+    return local_yaw_feature(sample)
 
 
 def euler_to_rotation_matrix_xyz(euler: List[float]) -> List[List[float]]:
@@ -177,19 +185,22 @@ def euler_to_rotation_matrix_xyz(euler: List[float]) -> List[List[float]]:
     return matmul(matmul(rz, ry), rx)
 
 
-def uav_local_position_feature(
+def local_position_feature(
     sample: dict,
     origin_pose: Optional[List[float]],
     position_scale: float = 100.0,
 ) -> List[float]:
-    """Return current UAV xyz feature, normalized.
+    """Return normalized current position in the record's local state frame.
 
-    New target-aligned JSONL stores ``target_local_position`` in the same frame
-    as ``action``: +x points to the trajectory endpoint, y is lateral offset,
-    and z is unchanged from the start-local frame. Older JSONL falls back to the
-    trajectory-start body frame computed from world pose.
+    Observable records provide yaw-only, start-relative NED odometry directly.
+    Legacy target-aligned records and the original pose-derived fallback remain
+    supported for reproducibility.
     """
     scale = max(abs(float(position_scale)), 1e-6)
+    local_position = sample.get("local_position")
+    if isinstance(local_position, list) and len(local_position) >= 3:
+        return [float(v) / scale for v in local_position[:3]]
+
     target_local_position = sample.get("target_local_position")
     if isinstance(target_local_position, list) and len(target_local_position) >= 3:
         return [float(v) / scale for v in target_local_position[:3]]
@@ -205,6 +216,22 @@ def uav_local_position_feature(
         for i in range(3)
     ]
     return [v / scale for v in local]
+
+
+def uav_local_position_feature(
+    sample: dict,
+    origin_pose: Optional[List[float]],
+    position_scale: float = 100.0,
+) -> List[float]:
+    """Backward-compatible alias for :func:`local_position_feature`."""
+    return local_position_feature(sample, origin_pose, position_scale)
+
+
+def trajectory_key(sample: dict) -> str:
+    """Return a scene-qualified trajectory key to avoid cross-scene collisions."""
+    scene_id = str(sample.get("scene_id", ""))
+    trajectory_id = str(sample.get("trajectory_id", sample.get("sample_id", "")))
+    return f"{scene_id}/{trajectory_id}" if scene_id else trajectory_id
 
 
 class HADDataset(Dataset):
@@ -248,7 +275,7 @@ class HADDataset(Dataset):
     def _build_trajectory_origin_pose(self) -> Dict[str, List[float]]:
         origins: Dict[str, List[float]] = {}
         for sample in self.samples:
-            traj_id = str(sample.get("trajectory_id", sample.get("sample_id", "")))
+            traj_id = trajectory_key(sample)
             pose = sample.get("pose") or []
             if traj_id and traj_id not in origins and len(pose) >= 6:
                 origins[traj_id] = [float(v) for v in pose[:6]]
@@ -274,10 +301,10 @@ class HADDataset(Dataset):
 
         altitude = torch.tensor(s["altitude"], dtype=torch.float)
         pose = torch.tensor(s["pose"], dtype=torch.float)
-        target_yaw_feat = torch.tensor(target_relative_yaw_feature(s), dtype=torch.float)
-        origin_pose = self.trajectory_origin_pose.get(str(s.get("trajectory_id", "")))
-        uav_position_feat = torch.tensor(
-            uav_local_position_feature(s, origin_pose, self.uav_position_scale),
+        local_yaw_feat = torch.tensor(local_yaw_feature(s), dtype=torch.float)
+        origin_pose = self.trajectory_origin_pose.get(trajectory_key(s))
+        local_position_feat = torch.tensor(
+            local_position_feature(s, origin_pose, self.uav_position_scale),
             dtype=torch.float,
         )
         action = torch.tensor(s["action"], dtype=torch.float)
@@ -296,6 +323,9 @@ class HADDataset(Dataset):
             "target_local_position": s.get("target_local_position", None),
             "target_local_yaw": s.get("target_local_yaw", None),
             "target_align_yaw": s.get("target_align_yaw", None),
+            "local_position": s.get("local_position", None),
+            "local_yaw": s.get("local_yaw", None),
+            "state_frame": s.get("state_frame", None),
             "coord_frame": s.get("coord_frame", None),
             "done": s.get("done", False),
         }
@@ -306,8 +336,12 @@ class HADDataset(Dataset):
             "down_image": down_img,
             "altitude": altitude,
             "pose": pose,
-            "target_yaw_feat": target_yaw_feat,
-            "uav_position_feat": uav_position_feat,
+            "local_yaw_feat": local_yaw_feat,
+            "local_position_feat": local_position_feat,
+            # Legacy aliases are intentionally retained until the model API is
+            # migrated; both names reference identical tensors.
+            "target_yaw_feat": local_yaw_feat,
+            "uav_position_feat": local_position_feat,
             "action": action,
             "height_stage": height_stage,
             "done": done,
@@ -323,6 +357,8 @@ def had_collate_fn(batch: List[dict]) -> dict:
         "down_image": torch.stack([b["down_image"] for b in batch]),
         "altitude": torch.stack([b["altitude"] for b in batch]),
         "pose": torch.stack([b["pose"] for b in batch]),
+        "local_yaw_feat": torch.stack([b["local_yaw_feat"] for b in batch]),
+        "local_position_feat": torch.stack([b["local_position_feat"] for b in batch]),
         "target_yaw_feat": torch.stack([b["target_yaw_feat"] for b in batch]),
         "uav_position_feat": torch.stack([b["uav_position_feat"] for b in batch]),
         "action": torch.stack([b["action"] for b in batch]),
