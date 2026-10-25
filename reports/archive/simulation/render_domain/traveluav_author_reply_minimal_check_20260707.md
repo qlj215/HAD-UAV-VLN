@@ -14,7 +14,7 @@
 - `mean stop logit delta` = `mean(|stop_logit_airsim - stop_logit_original|)`。
 - `pred_stop original -> AirSim` 使用现有 stop 阈值 `0.3`，即 logit 阈值 `-0.847298`。
 
-输入目录：`/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop`
+输入目录：`/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop`
 
 ## 已有评估指标复核
 

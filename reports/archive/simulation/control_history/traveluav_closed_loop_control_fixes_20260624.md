@@ -9,7 +9,7 @@
 - `engine/evaluate_traveluav_smoke.py`
 - `scripts/simulation/run_traveluav_closed_loop_eval.sh`
 - `scripts/simulation/run_traveluav_closed_loop_split.sh`
-- `/home/qlj/h3c_pro/TravelUAV/airsim_plugin/AirVLNSimulatorServerTool.py`
+- `/home/user/h3c_pro/TravelUAV/airsim_plugin/AirVLNSimulatorServerTool.py`
 
 ## 六项修改
 

@@ -1,7 +1,7 @@
 # TravelUAV 初始渲染与环境一致性简明分析
 
 生成/修订时间：2026-07-01
-项目目录：`/home/qlj/h3c_pro/HAD-UAV-VLN`
+项目目录：`/home/user/h3c_pro/HAD-UAV-VLN`
 主 A/B 实验：`sim_eval_outputs/20260701_192237_initial_view_ab_val_seen_BrushifyCountryRoads_10traj`
 旧 96 条批量对照：`sim_eval_outputs/20260701_144300_val_seen_model_teleport`
 渲染 warmup 探针：`sim_eval_outputs/20260701_203934_initial_render_warmup_probe_BrushifyCountryRoads_4e405584`
@@ -211,7 +211,7 @@ client.simSetTimeOfDay(
 结论：对当前 `BrushifyCountryRoads` 环境，AirSim `simSetTimeOfDay` 只有极小影响，没有把太阳/天空/光照切回训练数据的白天状态。可能原因包括：
 
 1. 该打包环境的 sky/sun/lighting 没有正确接入 AirSim Time of Day API。
-2. 训练数据采集用的环境包或默认关卡光照，与当前 `/home/qlj/TravelUAV_envs/BrushifyCountryRoads` 不一致。
+2. 训练数据采集用的环境包或默认关卡光照，与当前 `/home/user/TravelUAV_envs/BrushifyCountryRoads` 不一致。
 3. 需要控制的是 UE 场景内部的特定 Sky/DirectionalLight/曝光蓝图，而不是 AirSim 通用 Time of Day API。
 
 ## 7. 代码证据
@@ -272,7 +272,7 @@ B 每条重开约为 A 的 `1.96x`。由于 B 也没有解决视觉一致性问�
 优先级最高。需要确认当前使用的：
 
 ```text
-/home/qlj/TravelUAV_envs/BrushifyCountryRoads
+/home/user/TravelUAV_envs/BrushifyCountryRoads
 ```
 
 是否就是 TravelUAV 原始数据采集使用的同版本环境。建议：

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Wrapper for compare_step_pose_views.py on qlj@100.111.198.111.
+# Wrapper for compare_step_pose_views.py on user@host.example.invalid.
 #
 # Default example:
-#   cd /home/qlj/h3c_pro/HAD-UAV-VLN
+#   cd /home/user/h3c_pro/HAD-UAV-VLN
 #   scripts/simulation/diagnostics/run_compare_step_pose_views.sh
 #
 # Common tuning:
@@ -37,12 +37,12 @@ set -euo pipefail
 #   The Python comparison script writes comparison_grid.png, step_report.json,
 #   and summary.json under the chosen output directory.
 
-HAD_ROOT="${HAD_ROOT:-/home/qlj/h3c_pro/HAD-UAV-VLN}"
-TRAVELUAV_ROOT="${TRAVELUAV_ROOT:-/home/qlj/h3c_pro/TravelUAV}"
-ENV_ROOT="${ENV_ROOT:-/home/qlj/TravelUAV_envs}"
-AIRSIM_PY="${AIRSIM_PY:-/home/qlj/miniconda3/envs/traveluav-airsim/bin/python}"
-REPORT_PY="${REPORT_PY:-/home/qlj/miniconda3/envs/GPTSoVits/bin/python}"
-AIRSIM_SITE_PACKAGES="${AIRSIM_SITE_PACKAGES:-/home/qlj/miniconda3/envs/traveluav-airsim/lib/python3.10/site-packages}"
+HAD_ROOT="${HAD_ROOT:-/home/user/h3c_pro/HAD-UAV-VLN}"
+TRAVELUAV_ROOT="${TRAVELUAV_ROOT:-/home/user/h3c_pro/TravelUAV}"
+ENV_ROOT="${ENV_ROOT:-/home/user/TravelUAV_envs}"
+AIRSIM_PY="${AIRSIM_PY:-/home/user/miniconda3/envs/traveluav-airsim/bin/python}"
+REPORT_PY="${REPORT_PY:-/home/user/miniconda3/envs/GPTSoVits/bin/python}"
+AIRSIM_SITE_PACKAGES="${AIRSIM_SITE_PACKAGES:-/home/user/miniconda3/envs/traveluav-airsim/lib/python3.10/site-packages}"
 
 SCENE="BrushifyCountryRoads"
 TRAJECTORY_ID="0008c004-9c02-40d3-928f-b7228c17a39d"

@@ -2,7 +2,7 @@
 Single-trajectory Streamlit viewer for HAD TravelUAV closed-loop results.
 
 Run on laptopRTX3070:
-  cd /home/qlj/h3c_pro/HAD-UAV-VLN
+  cd /home/user/h3c_pro/HAD-UAV-VLN
   .venv/bin/python -m streamlit run visualize/vis_trajectory.py \
     --server.address 0.0.0.0 --server.port 8503 -- \
     /path/to/sim_eval_outputs/.../trajectories/fail_Scene_TrajId
@@ -21,7 +21,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 
-DEFAULT_RAW_DATA_DIR = "/home/qlj/datasets/TravelUAVData"
+DEFAULT_RAW_DATA_DIR = "/home/user/datasets/TravelUAVData"
 DEFAULT_TRAJECTORY_DIR = ""
 
 CAMERAS = {
@@ -1255,7 +1255,7 @@ def main() -> None:
     if not trajectory_text.strip():
         st.info("请输入 legacy `trajectories/...` 目录、compact run 目录或 trace JSONL。")
         st.code(
-            "/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260623_143135_train_closed_loop/"
+            "/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260623_143135_train_closed_loop/"
             "scenes/20260623_143135_train_BrushifyCountryRoads/trajectories/"
             "fail_BrushifyCountryRoads_0008c004-9c02-40d3-928f-b7228c17a39d",
             language="text",

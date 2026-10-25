@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """Render AirSim views at exact TravelUAV step poses and compare images.
 
-Quick start on qlj@100.111.198.111:
+Quick start on user@host.example.invalid:
 
 1. Start the TravelUAV scene server in one shell.
 
-   cd /home/qlj/h3c_pro/TravelUAV
-   /home/qlj/miniconda3/envs/traveluav-airsim/bin/python -u \
+   cd /home/user/h3c_pro/TravelUAV
+   /home/user/miniconda3/envs/traveluav-airsim/bin/python -u \
      airsim_plugin/AirVLNSimulatorServerTool.py \
      --port 30000 \
-     --root_path /home/qlj/TravelUAV_envs \
+     --root_path /home/user/TravelUAV_envs \
      --gpus 0
 
 2. Open the AirSim scene in another shell. The returned scene port is usually
    30001 when the server port is 30000 and no other scene is open.
 
-   /home/qlj/miniconda3/envs/traveluav-airsim/bin/python - <<'PY'
+   /home/user/miniconda3/envs/traveluav-airsim/bin/python - <<'PY'
    import msgpackrpc
    client = msgpackrpc.Client(
        msgpackrpc.Address("127.0.0.1", 30000),
@@ -34,9 +34,9 @@ Quick start on qlj@100.111.198.111:
 
 3. Run this comparison script against the AirSim scene port.
 
-   cd /home/qlj/h3c_pro/HAD-UAV-VLN
-   PYTHONPATH=/home/qlj/miniconda3/envs/traveluav-airsim/lib/python3.10/site-packages \
-   /home/qlj/miniconda3/envs/GPTSoVits/bin/python \
+   cd /home/user/h3c_pro/HAD-UAV-VLN
+   PYTHONPATH=/home/user/miniconda3/envs/traveluav-airsim/lib/python3.10/site-packages \
+   /home/user/miniconda3/envs/GPTSoVits/bin/python \
      scripts/simulation/diagnostics/compare_step_pose_views.py \
      --scene BrushifyCountryRoads \
      --trajectory-id 0008c004-9c02-40d3-928f-b7228c17a39d \
@@ -59,7 +59,7 @@ Important parameters:
 * --skip-remote: skip SeeTaCloud SSH image fetching and use the local raw
   TravelUAVData / processed fallback data.
 * --raw-data-root: optional local raw TravelUAVData root. The script also
-  checks /home/qlj/h3c_pro/HAD-UAV-VLN/TravelUAVData by default.
+  checks /home/user/h3c_pro/HAD-UAV-VLN/TravelUAVData by default.
 * --processed-data-root: optional HAD processed data fallback root. Only
   front/down views are available from processed fallback images.
 * --image-channel-mode: opencv_bgr_compat by default, matching the TravelUAV
@@ -81,7 +81,7 @@ Pose safety rules:
 
 Cleanup after manual server startup:
 
-   /home/qlj/miniconda3/envs/traveluav-airsim/bin/python - <<'PY'
+   /home/user/miniconda3/envs/traveluav-airsim/bin/python - <<'PY'
    import msgpackrpc
    client = msgpackrpc.Client(msgpackrpc.Address("127.0.0.1", 30000), timeout=20)
    print(client.call("close_scenes", "127.0.0.1"))
@@ -114,8 +114,8 @@ VIEW_SPECS = [
 ]
 PROCESSED_VIEW_DIRS = {"front": "front", "down": "down"}
 
-DEFAULT_REMOTE_HOST = "root@connect.bjb2.seetacloud.com"
-DEFAULT_REMOTE_PORT = 47113
+DEFAULT_REMOTE_HOST = "user@host.example.invalid"
+DEFAULT_REMOTE_PORT = 22
 DEFAULT_REMOTE_ROOTS = ["/root/autodl-tmp/TravelUAVData"]
 DEFAULT_POSITION_TOL_M = 0.01
 DEFAULT_ORIENTATION_TOL_DEG = 0.1
@@ -328,8 +328,8 @@ def default_raw_roots(root: Path) -> list[Path]:
         [
             Path("/root/autodl-tmp/TravelUAVData"),
             Path("/root/autodl-tmp/TravelUAV_mini_dataset"),
-            Path("/home/qlj/h3c_pro/TravelUAVData"),
-            Path("/home/qlj/h3c_pro/TravelUAV/TravelUAV_mini_dataset"),
+            Path("/home/user/h3c_pro/TravelUAVData"),
+            Path("/home/user/h3c_pro/TravelUAV/TravelUAV_mini_dataset"),
             root / "TravelUAVData",
             root / "TravelUAV_mini_dataset",
             root.parent / "TravelUAVData",
@@ -346,7 +346,7 @@ def default_processed_roots(root: Path) -> list[Path]:
         roots.append(Path(env_root))
     roots.extend(
         [
-            Path("/home/qlj/h3c_pro/HAD-UAV-VLN/data/processed_4_full_classes"),
+            Path("/home/user/h3c_pro/HAD-UAV-VLN/data/processed_4_full_classes"),
             root / "data" / "processed_4_full_classes",
             root / "data" / "processed",
         ]

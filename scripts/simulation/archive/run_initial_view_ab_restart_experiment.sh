@@ -17,8 +17,8 @@ Example:
     --split val_seen \
     --scene BrushifyCountryRoads \
     --count 10 \
-    --checkpoint /home/qlj/h3c_pro/HAD-UAV-VLN/local_checkpoints/lr5e-5_bs96_beta0.5_sign0.2_dzw3_ep15/best_model.pth \
-    --vocab /home/qlj/h3c_pro/HAD-UAV-VLN/local_checkpoints/lr5e-5_bs96_beta0.5_sign0.2_dzw3_ep15/vocab.json
+    --checkpoint /home/user/h3c_pro/HAD-UAV-VLN/local_checkpoints/lr5e-5_bs96_beta0.5_sign0.2_dzw3_ep15/best_model.pth \
+    --vocab /home/user/h3c_pro/HAD-UAV-VLN/local_checkpoints/lr5e-5_bs96_beta0.5_sign0.2_dzw3_ep15/vocab.json
 
 Useful options:
   --split NAME                    Default: val_seen.
@@ -32,9 +32,9 @@ Useful options:
   --timestamp TEXT                Default: current date-time.
   --checkpoint PATH               Default: local HAD checkpoint.
   --vocab PATH                    Default: local HAD vocab.
-  --traveluav-root PATH           Default: /home/qlj/h3c_pro/TravelUAV.
-  --env-root PATH                 Default: /home/qlj/TravelUAV_envs.
-  --raw-data-dir PATH             Default: /home/qlj/datasets/TravelUAVData.
+  --traveluav-root PATH           Default: /home/user/h3c_pro/TravelUAV.
+  --env-root PATH                 Default: /home/user/TravelUAV_envs.
+  --raw-data-dir PATH             Default: /home/user/datasets/TravelUAVData.
   --max-steps N                   Default: 200. Use 1 for a faster initial-state-only smoke.
   --movement-mode MODE            teleport | move_on_path. Default: teleport.
   --record-image-stride N         Default: 1000000, so only step 0 is saved.
@@ -81,9 +81,9 @@ TIMESTAMP="${TIMESTAMP:-}"
 RUN_SUFFIX="initial_view_ab"
 CHECKPOINT="${CHECKPOINT:-${REPO_ROOT}/local_checkpoints/lr5e-5_bs96_beta0.5_sign0.2_dzw3_ep15/best_model.pth}"
 VOCAB_PATH="${VOCAB_PATH:-${REPO_ROOT}/local_checkpoints/lr5e-5_bs96_beta0.5_sign0.2_dzw3_ep15/vocab.json}"
-TRAVELUAV_ROOT="${TRAVELUAV_ROOT:-/home/qlj/h3c_pro/TravelUAV}"
-ENV_ROOT="${ENV_ROOT:-/home/qlj/TravelUAV_envs}"
-RAW_DATA_DIR="${RAW_DATA_DIR:-/home/qlj/datasets/TravelUAVData}"
+TRAVELUAV_ROOT="${TRAVELUAV_ROOT:-/home/user/h3c_pro/TravelUAV}"
+ENV_ROOT="${ENV_ROOT:-/home/user/TravelUAV_envs}"
+RAW_DATA_DIR="${RAW_DATA_DIR:-/home/user/datasets/TravelUAVData}"
 MAX_STEPS="200"
 SUCCESS_THRESHOLD="20"
 STOP_THRESHOLD="0.3"

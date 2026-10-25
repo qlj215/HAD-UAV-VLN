@@ -803,14 +803,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare TravelUAV training initial inputs with AirSim inference initial inputs."
     )
-    parser.add_argument("--processed_data_dir", default="/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_metadata/TravelUAVProcessedData_target_aligned")
+    parser.add_argument("--processed_data_dir", default="/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_metadata/TravelUAVProcessedData_target_aligned")
     parser.add_argument("--image_data_dir", default=None, help="Optional root containing images/front and images/down.")
     parser.add_argument("--split", default="train", help="Split name used only when --split_metadata_path is omitted.")
     parser.add_argument("--split_metadata_path", default=None)
     parser.add_argument("--vocab_path", default=None)
-    parser.add_argument("--raw_data_dir", default="/home/qlj/datasets/TravelUAVData")
-    parser.add_argument("--traveluav_root", default="/home/qlj/h3c_pro/TravelUAV")
-    parser.add_argument("--env_root", default="/home/qlj/TravelUAV_envs")
+    parser.add_argument("--raw_data_dir", default="/home/user/datasets/TravelUAVData")
+    parser.add_argument("--traveluav_root", default="/home/user/h3c_pro/TravelUAV")
+    parser.add_argument("--env_root", default="/home/user/TravelUAV_envs")
     parser.add_argument("--scene", required=True)
     parser.add_argument("--trajectory_ids", nargs="+", default=None)
     parser.add_argument("--num_trajectories", type=int, default=1)

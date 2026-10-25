@@ -27,7 +27,7 @@
 - baseline commit：`b716b9625b5e5b747cb2eb8a9ef0d3d0251d6707`；
 - implementation commit：`f1582bbaa35a239c1f4a98c4a5492516ef27110a`；
 - tag：`sim-refactor-baseline-20260710`；
-- 仓库外备份：`/home/qlj/h3c_pro/HAD-UAV-VLN-sim-refactor-backup-20260710/`，含 tracked binary patch、未跟踪仿真源码压缩包和 `SHA256SUMS`。
+- 仓库外备份：`/home/user/h3c_pro/HAD-UAV-VLN-sim-refactor-backup-20260710/`，含 tracked binary patch、未跟踪仿真源码压缩包和 `SHA256SUMS`。
 
 `engine/simulation/data.py` 负责 trajectory/instruction/expert JSONL、四元数和 target-aligned 变换；`runtime.py` 负责 server/scene/reset、RGB/state/collision、teleport/move-on-path/hover/recording；`evaluator.py` 负责模型适配、单轨迹与 split 调度、指标和 minimal/debug/legacy writer。旧 `engine/evaluate_traveluav_smoke.py` 收敛为 YAML/CLI/校验、运行装配与兼容 re-export；三个历史诊断/渲染工具的旧 import 路径通过回归测试。
 

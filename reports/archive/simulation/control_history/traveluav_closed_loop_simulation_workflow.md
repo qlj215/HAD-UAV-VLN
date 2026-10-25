@@ -2,11 +2,11 @@
 
 本文只依据当前 laptopRTX3070 上的代码和配置进行说明，核心代码路径为：
 
-- `/home/qlj/h3c_pro/HAD-UAV-VLN/engine/evaluate_traveluav_smoke.py`
-- `/home/qlj/h3c_pro/HAD-UAV-VLN/scripts/run_traveluav_closed_loop_eval.sh`
-- `/home/qlj/h3c_pro/HAD-UAV-VLN/engine/evaluate.py`
-- `/home/qlj/h3c_pro/TravelUAV/airsim_plugin/AirVLNSimulatorServerTool.py`
-- `/home/qlj/h3c_pro/TravelUAV/airsim_plugin/AirVLNSimulatorClientTool.py`
+- `/home/user/h3c_pro/HAD-UAV-VLN/engine/evaluate_traveluav_smoke.py`
+- `/home/user/h3c_pro/HAD-UAV-VLN/scripts/run_traveluav_closed_loop_eval.sh`
+- `/home/user/h3c_pro/HAD-UAV-VLN/engine/evaluate.py`
+- `/home/user/h3c_pro/TravelUAV/airsim_plugin/AirVLNSimulatorServerTool.py`
+- `/home/user/h3c_pro/TravelUAV/airsim_plugin/AirVLNSimulatorClientTool.py`
 
 结论先行：
 
@@ -22,13 +22,13 @@
 常用入口脚本是：
 
 ```bash
-/home/qlj/h3c_pro/HAD-UAV-VLN/scripts/run_traveluav_closed_loop_eval.sh
+/home/user/h3c_pro/HAD-UAV-VLN/scripts/run_traveluav_closed_loop_eval.sh
 ```
 
 这个脚本的用途在文件头部说明为“Run one TravelUAV closed-loop evaluation scene with HAD”，输出目录规则为：
 
 ```text
-/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/<timestamp>_<run_name>
+/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/<timestamp>_<run_name>
 ```
 
 脚本会选择 Python 解释器：
@@ -110,9 +110,9 @@ python engine/evaluate_traveluav_smoke.py \
 |---|---:|---|
 | `--checkpoint` | 必填 | HAD checkpoint `.pth` |
 | `--vocab_path` | 必填 | checkpoint 对应的 vocab |
-| `--traveluav_root` | `/home/qlj/h3c_pro/TravelUAV` | TravelUAV 仓库根目录 |
-| `--env_root` | `/home/qlj/TravelUAV_envs` | Unreal/AirSim 场景可执行文件根目录 |
-| `--raw_data_dir` | `/home/qlj/datasets/TravelUAVData` | 原始 TravelUAVData 根目录 |
+| `--traveluav_root` | `/home/user/h3c_pro/TravelUAV` | TravelUAV 仓库根目录 |
+| `--env_root` | `/home/user/TravelUAV_envs` | Unreal/AirSim 场景可执行文件根目录 |
+| `--raw_data_dir` | `/home/user/datasets/TravelUAVData` | 原始 TravelUAVData 根目录 |
 | `--scene` | `BrushifyCountryRoads` | 要评估的场景名 |
 | `--num_trajectories` | `1` | 从 `start_index` 开始选取的轨迹数 |
 | `--start_index` | `0` | 轨迹目录排序后的起始偏移 |
@@ -174,7 +174,7 @@ python engine/evaluate_traveluav_smoke.py \
 如果传入 `--start_server`，`start_server(args)` 会启动：
 
 ```bash
-python /home/qlj/h3c_pro/TravelUAV/airsim_plugin/AirVLNSimulatorServerTool.py \
+python /home/user/h3c_pro/TravelUAV/airsim_plugin/AirVLNSimulatorServerTool.py \
   --port <server_port> \
   --root_path <env_root> \
   --gpus <gpu_id>
@@ -209,7 +209,7 @@ PYTHONPATH=<traveluav_root>
 
 TravelUAV 的 `AirVLNSimulatorServerTool.py` 负责 msgpackrpc server，`serve()` 会创建 `msgpackrpc.Server(EventHandler())` 并监听 `HOST, PORT`。
 
-代码证据：`/home/qlj/h3c_pro/TravelUAV/airsim_plugin/AirVLNSimulatorServerTool.py:654-662`。
+代码证据：`/home/user/h3c_pro/TravelUAV/airsim_plugin/AirVLNSimulatorServerTool.py:654-662`。
 
 当前 TravelUAV settings 文件中场景 AirSim 以 multirotor 模式运行，车辆类型为 SimpleFlight：
 
@@ -222,7 +222,7 @@ TravelUAV 的 `AirVLNSimulatorServerTool.py` 负责 msgpackrpc server，`serve()
 "LockStep": true
 ```
 
-代码证据：`/home/qlj/h3c_pro/TravelUAV/airsim_plugin/settings/30001/settings.json`。
+代码证据：`/home/user/h3c_pro/TravelUAV/airsim_plugin/settings/30001/settings.json`。
 
 注意：TravelUAV 仓库中没有 `moveOnPath` 服务端实现；HAD 侧通过 AirSim Python client 发 RPC，实际路径跟随由 AirSim/Unreal 场景执行。能从代码严格确认的是“传给 AirSim 的参数”和“HAD 如何读取 AirSim 状态”，不能把 AirSim 内部控制方程写成 HAD 代码事实。
 
@@ -683,7 +683,7 @@ adaptive_lookahead = 1
 airsim_client.moveOnPathAsync(...)
 ```
 
-代码证据：`/home/qlj/h3c_pro/TravelUAV/airsim_plugin/AirVLNSimulatorClientTool.py:294-315`。
+代码证据：`/home/user/h3c_pro/TravelUAV/airsim_plugin/AirVLNSimulatorClientTool.py:294-315`。
 
 ### 8.9 AirSim 移动过程中如何判断是否完成当前 step
 

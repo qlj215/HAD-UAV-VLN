@@ -10,11 +10,11 @@
 
 ## 数据与运行信息
 
-- 结果目录：`/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop`
+- 结果目录：`/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop`
 - 实际运行主机：`laptopRTX3070`。AutoDL 当前为无卡模式，所以没有在 AutoDL 上跑全量离线评估。
-- 模型 checkpoint：`/home/qlj/h3c_pro/HAD-UAV-VLN/local_checkpoints/lr5e-5_bs96_beta0.5_sign0.2_dzw3_ep15/best_model.pth`
-- 原始图像数据：`/home/qlj/h3c_pro/HAD-UAV-VLN/data/processed_4_full_classes/images`
-- AirSim 伪图像数据：`/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260703_airsim_render_target_aligned_airsim_render_processed_dataset/dataset/images`
+- 模型 checkpoint：`/home/user/h3c_pro/HAD-UAV-VLN/local_checkpoints/lr5e-5_bs96_beta0.5_sign0.2_dzw3_ep15/best_model.pth`
+- 原始图像数据：`/home/user/h3c_pro/HAD-UAV-VLN/data/processed_4_full_classes/images`
+- AirSim 伪图像数据：`/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260703_airsim_render_target_aligned_airsim_render_processed_dataset/dataset/images`
 - 评估 split：`train`, `val_seen`
 - 跳过 split：`val_unseen`，对应 `Carla_Town06`，AirSim 图像缺失 `20536` 条。
 
@@ -95,13 +95,13 @@
 
 ## 源文件
 
-- 汇总 JSON：`/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/metrics_compare_summary.json`
-- 汇总 Markdown：`/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/metrics_compare_summary.md`
-- `original_first/train`：`/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/original_first/train/eval_overall.json`
-- `airsim_first/train`：`/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/airsim_first/train/eval_overall.json`
-- `original_first/val_seen`：`/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/original_first/val_seen/eval_overall.json`
-- `airsim_first/val_seen`：`/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/airsim_first/val_seen/eval_overall.json`
-- `original_full/train`：`/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/original_full/train/eval_overall.json`
-- `airsim_full/train`：`/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/airsim_full/train/eval_overall.json`
-- `original_full/val_seen`：`/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/original_full/val_seen/eval_overall.json`
-- `airsim_full/val_seen`：`/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/airsim_full/val_seen/eval_overall.json`
+- 汇总 JSON：`/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/metrics_compare_summary.json`
+- 汇总 Markdown：`/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/metrics_compare_summary.md`
+- `original_first/train`：`/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/original_first/train/eval_overall.json`
+- `airsim_first/train`：`/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/airsim_first/train/eval_overall.json`
+- `original_first/val_seen`：`/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/original_first/val_seen/eval_overall.json`
+- `airsim_first/val_seen`：`/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/airsim_first/val_seen/eval_overall.json`
+- `original_full/train`：`/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/original_full/train/eval_overall.json`
+- `airsim_full/train`：`/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/airsim_full/train/eval_overall.json`
+- `original_full/val_seen`：`/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/original_full/val_seen/eval_overall.json`
+- `airsim_full/val_seen`：`/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260704_train_val_seen_pseudo_offline_eval_laptop/airsim_full/val_seen/eval_overall.json`

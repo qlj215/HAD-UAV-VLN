@@ -13,15 +13,15 @@ usage() {
   scripts/simulation/tools/sync_traveluav_target_aligned_metadata.sh
 
 默认路径：
-  remote: root@connect.bjb2.seetacloud.com:47113
+  remote: user@host.example.invalid:22
   remote dir: /root/autodl-tmp/TravelUAVProcessedData_target_aligned
   local dir:  repo/sim_eval_metadata/TravelUAVProcessedData_target_aligned
 
 只复制 JSONL/vocab metadata，不复制 processed images。
 
 参数：
-  --remote-host HOST       Default: root@connect.bjb2.seetacloud.com
-  --remote-port PORT       Default: 47113
+  --remote-host HOST       Default: user@host.example.invalid
+  --remote-port PORT       Default: 22
   --remote-dir PATH        Default: /root/autodl-tmp/TravelUAVProcessedData_target_aligned
   --dest-dir PATH          Default: repo/sim_eval_metadata/TravelUAVProcessedData_target_aligned
   --include-val            Also sync val.jsonl for ad-hoc checks.
@@ -35,8 +35,8 @@ quote_cmd() {
 }
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-REMOTE_HOST="root@connect.bjb2.seetacloud.com"
-REMOTE_PORT="47113"
+REMOTE_HOST="user@host.example.invalid"
+REMOTE_PORT="22"
 REMOTE_DIR="/root/autodl-tmp/TravelUAVProcessedData_target_aligned"
 DEST_DIR="${REPO_ROOT}/sim_eval_metadata/TravelUAVProcessedData_target_aligned"
 INCLUDE_VAL="0"

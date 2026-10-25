@@ -1,6 +1,6 @@
 # DepthAnythingV2 与 AirSim 深度图抽样对比
 
-- 输出目录: `/home/qlj/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260708_airsim_depth_da_sample`
+- 输出目录: `/home/user/h3c_pro/HAD-UAV-VLN/sim_eval_outputs/20260708_airsim_depth_da_sample`
 - 抽样: `12` 个 pose, `24` 张深度图(front/down)
 - 位姿来源: `merged_data.json -> trajectory_raw[step]` 的 AirSim 世界坐标和四元数；未使用局部/目标对齐坐标。
 - AirSim 深度: `DepthPerspective` float metric depth；DepthAnythingV2 深度: 每张图独立 min-max 到 uint8 的相对深度。

@@ -6,9 +6,9 @@ PYTHON_BIN="${PYTHON:-${ROOT_DIR}/.venv/bin/python}"
 
 PROCESSED_DATA_DIR="${PROCESSED_DATA_DIR:-${ROOT_DIR}/sim_eval_metadata/TravelUAVProcessedData_target_aligned}"
 IMAGE_DATA_DIR="${IMAGE_DATA_DIR:-}"
-RAW_DATA_DIR="${RAW_DATA_DIR:-/home/qlj/datasets/TravelUAVData}"
-TRAVELUAV_ROOT="${TRAVELUAV_ROOT:-/home/qlj/h3c_pro/TravelUAV}"
-ENV_ROOT="${ENV_ROOT:-/home/qlj/TravelUAV_envs}"
+RAW_DATA_DIR="${RAW_DATA_DIR:-/home/user/datasets/TravelUAVData}"
+TRAVELUAV_ROOT="${TRAVELUAV_ROOT:-/home/user/h3c_pro/TravelUAV}"
+ENV_ROOT="${ENV_ROOT:-/home/user/TravelUAV_envs}"
 VOCAB_PATH="${VOCAB_PATH:-${PROCESSED_DATA_DIR}/vocab.json}"
 
 SPLIT="train"
